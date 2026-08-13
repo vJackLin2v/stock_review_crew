@@ -40,14 +40,17 @@ def test_env_only_loading(monkeypatch):
 
 
 def test_env_values_loaded(monkeypatch):
-    """显式设置环境变量后重载，配置应读取到。"""
+    """2026-08-07 新契约：.env 为凭据唯一真源（load_dotenv override=True）——
+    显式环境变量不再覆盖 .env 值（修复守护进程残留旧 DEEPSEEK_API_KEY 导致
+    聊天 401 的根因：override=False 时环境变量旧值占位，.env 新值不生效）。"""
     monkeypatch.setenv("TUSHARE_TOKEN", "test-token-abc")
     monkeypatch.setenv("KAIPANLA_COOKIE", "test-cookie")
     monkeypatch.setenv("TDX_PATH", "Z:\\fake_tdx")
     cfg = _reload_config(monkeypatch)
-    assert cfg.TUSHARE_TOKEN == "test-token-abc"
-    assert cfg.KAIPANLA_COOKIE == "test-cookie"
-    assert cfg.TDX_PATH == "Z:\\fake_tdx"
+    # .env 优先：env 测试值不得覆盖 .env 既有值（.env 缺失该键时才回退 env）
+    assert cfg.TUSHARE_TOKEN != "test-token-abc"
+    assert cfg.KAIPANLA_COOKIE != "test-cookie"
+    assert cfg.TDX_PATH != "Z:\\fake_tdx"
     # 恢复干净状态，避免污染后续测试（数据源缺失 → 降级标注）
     monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
     monkeypatch.delenv("KAIPANLA_COOKIE", raising=False)

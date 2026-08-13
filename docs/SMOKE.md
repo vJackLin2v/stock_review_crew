@@ -1,6 +1,6 @@
 # 真实数据冒烟记录（2026-08-03）
 
-> 服务：`uvicorn backend.main:app`（.venv Python 3.12 / chroma 1.5.9），端口 8502；
+> 服务：`uvicorn backend.main:app`（.venv Python 3.12 / chroma 1.5.9），端口 8501；
 > 代理：127.0.0.1:7890；LLM：opencode.ai/zen/go/v1（deepseek-v4-flash，真实调用）。
 > 冒烟脚本：`python scripts/smoke_review.py <date> <mode>`。
 
@@ -49,3 +49,17 @@
 备注：
 - PS 5.1 传参坑：多行 here-string 传给 `python -c` 时，参数内双引号会被剥掉并截断脚本（实测 `strip('"')` 被改成 `strip('')` 后截断）；本轮脚本用 `chr(34)/chr(126)` 规避，后续冒烟脚本应避免在 `-c` 代码中出现双引号。
 - 本轮仅验证 R6 三个实时函数；`fetch_breadth_realtime` 待代理节点恢复后复跑（同窗口 13:00 后亦可复测下午盘中值）。
+
+## R8 聊天智能流程（2026-08-04）
+
+> 验证时间：2026-08-04 16:46；服务：.venv uvicorn 8501；代理 127.0.0.1:7890；LLM 真实调用（双分析师）。
+> 以下聊天内容仅供技术冒烟记录，仅供参考，不构成投资建议。
+
+| 项目 | 结果 |
+|---|---|
+| 6 步事件序列 | ✅ stage(parse→need→fetch) → analyst_start/analyst_delta*(流式) → analyst_end×2 → stage(summarize) → summary_delta*(流式, 316 字) → summary_end → done |
+| parse 解析（真实 LLM） | ✅ `{intent: trend, target: 600519, time_range: 近5日}` |
+| 数据需求与取数 | ✅ needs 8 项 data_key 均在白名单；降级如实标注（minute_kline→腾讯分时、news→央视无数据、sectors→腾讯行业排行、news_headlines→央视无数据） |
+| 数字核验 | ✅ 收盘 1328.36 / 跌 2.25% / 开 1350.06 / 高 1350.94 / 换手 0.3% 与腾讯实时行情逐位一致；verify_numbers 13 项精确命中（跨主体数字误报为工具已知限制，非 LLM 幻觉） |
+| 合规 | ✅ 消息尾部恒含免责声明；stage 事件仅含提示、不携带需求清单（Q7）；分析缺失数据时明确说明（近 5 日 K 线不全等） |
+| 耗时 | 121.6s（双分析师真实 LLM 流式，含 4 次 LLM 调用 + 多块取数） |

@@ -7,8 +7,9 @@
 
 - **6 模式复盘**：早盘前决策 / 竞价复盘 / 上午盘中 / 午间复盘 / 下午盘中 / 收盘复盘；
   模式决定取数与提示词，历史日期可补做，数据缺失自动降级标注；
-- **分析师聊天**：与 5 位分析师（阿狼/爱在冰川/拔小弦/炒股养家/铁锤）单人或多人交叉问答，
-  上下文含标的数据与历史复盘结论，免责声明程序级强制；
+- **分析师聊天**：与 5 位分析师（阿狼/爱在冰川/拔小弦/炒股养家/铁锤）单人或多人问答；
+  聊天走智能 6 步流水线（问题解析 → 分析师数据需求 → 取数 → 基于真实数据分析 → 综合总结流式），
+  过程显示「当前步骤」提示，取数失败如实告知缺失项，免责声明程序级强制；
 - **历史存储**：`data/reviews/{日期}/{时间}/`（meta+报告+快照），同日多份，支持删除；
 - **Codex 桌面风格前端**：深色侧栏、分步进度条、红涨绿跌、ECharts 图表、全中文。
 
@@ -18,7 +19,7 @@
 
 ```text
 双击项目根目录：
-  「启动服务.bat」  → 本地服务：自动启动后端并打开 http://127.0.0.1:8502
+  「启动服务.bat」  → 本地服务：自动启动后端并打开 http://127.0.0.1:8501
   「启动隧道.bat」  → 本地服务 + Cloudflare 公网隧道（打印公网地址）
 ```
 
@@ -27,17 +28,17 @@
 ```powershell
 # 启动后端（.venv；数据源走本机代理 127.0.0.1:7890）
 $env:HTTP_PROXY='http://127.0.0.1:7890'; $env:HTTPS_PROXY='http://127.0.0.1:7890'
-H:\stock_review_crew\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8502
+H:\stock_review_crew\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8501
 ```
 
-打开 http://127.0.0.1:8502（8502 为默认端口；8501 常被 synalysis 占用）。
+打开 http://127.0.0.1:8501（端口统一为 8501，与 `AGENTS.md` 一致）。
 开发前端：`cd frontend; npm run dev`（无后端时自动降级 mock）。
 
 ## 测试与冒烟
 
 ```powershell
-python -m pytest -p no:cacheprovider tests\test_backend.py tests\test_backend_chat.py tests\test_chat_engine.py tests\test_chat_history.py tests\test_chat_storage.py tests\test_data_auction.py tests\test_data_common.py tests\test_data_config.py tests\test_data_degrade.py tests\test_data_minute_lhb.py tests\test_data_modes.py tests\test_data_sentiment.py tests\test_data_tdx_local.py tests\test_graph.py tests\test_prompts.py tests\test_storage_import.py tests\test_storage_reviews.py
-#（PowerShell 不展开通配符，需显式列文件；当前 190 passed）
+python -m pytest -p no:cacheprovider -q
+# 全量 pytest 实测数：491 passed（2026-08-08，系统 Python 3.13，无环境性失败）
 ```
 
 真实数据冒烟：`python scripts/smoke_review.py <YYYY-MM-DD> <mode>`（记录见 `docs/SMOKE.md`）。
@@ -50,10 +51,13 @@ src/stock_review_crew/
   graph.py                 6 模式感知 LangGraph（取数→资讯→趋势派→情绪派→主持人→辩论→报告）
   prompts.py               6 模式提示词模板 + 主持人/复盘助手角色
   chat.py                  聊天引擎（单/多分析师交叉，免责声明强制）
+  quality.py               复盘/聊天质量评估（Langfuse trace + 数字核验 + rubric 打分）
   tools/stock_data.py      数据层：6 模式取数、超时≤30s、降级链、source/degraded 标注
+  tools/market_extra.py    R10 市场扩展：市场天气/情绪温度、纳斯达克、额外指数、风格坐标、板块温度榜
   tools/tdx_local.py       通达信本地数据只读解析（F:\tdx）
   storage/reviews.py       历史复盘存储（同日多份/删除/上下文注入）
   storage/chats.py         对话存储
+  storage/watchlist.py     观察列表（R10：增删改排，data/watchlist.json）
   knowledge_store.py       ChromaDB 历史复盘/对话检索
 frontend/                  React + Vite + ECharts（Codex 桌面风格）
 skills/                    5 位分析师 + 主持人 + 复盘助手（JSON 人格）

@@ -1,14 +1,10 @@
 import React from "react";
-import { STAGES, stageIndex, stageLabel } from "../stages";
+import { stageLabel, visibleStages } from "../stages";
 
 function stepText(s, job) {
-  if (s.key === "trend") {
-    const done = Math.min(Math.max(0, job.analysts_done || 0), 2);
-    return `趋势派 ${done}/2`;
-  }
-  if (s.key === "sentiment") {
-    const done = Math.max(0, (job.analysts_done || 0) - 2);
-    return `情绪派 ${Math.min(done, 3)}/3`;
+  if (s.key === "analysts") {
+    const done = Math.min(Math.max(0, job.analysts_done || 0), 5);
+    return `分析师 ${done}/5`;
   }
   return s.label;
 }
@@ -16,7 +12,10 @@ function stepText(s, job) {
 export default function ProgressView({ job, onNew }) {
   const isError = job.status === "error";
   const isQueued = job.status === "queued";
-  const idx = isQueued ? -1 : stageIndex(job.stage);
+  const stages = visibleStages(); // 2026-08-12：资讯开关关闭时隐藏「资讯」步骤
+  const idx = isQueued
+    ? -1
+    : stages.findIndex((s) => String(job.stage || "").toLowerCase().includes(s.key));
   const pct = Math.max(0, Math.min(100, Number(job.pct) || 0));
 
   if (isError) {
@@ -44,7 +43,7 @@ export default function ProgressView({ job, onNew }) {
       <p className="card-sub">后端任务每 1 秒自动刷新进度，切换页面不中断任务，请勿重复提交</p>
 
       <div className="steps">
-        {STAGES.map((s, i) => {
+        {stages.map((s, i) => {
           const state = isQueued ? "pending" : i < idx ? "done" : i === idx ? "current" : "pending";
           return (
             <div key={s.key} className={`step ${state}`}>

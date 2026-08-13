@@ -19,6 +19,11 @@ from .tdx_local import (
     resolve_market, day_file_path, minline_file_path, TdxError,
 )
 
+from .market_extra import (
+    compute_market_weather, fetch_market_weather, fetch_us_nasdaq,
+    fetch_sector_heat, fetch_extra_indices, fetch_style_quad,
+)
+
 __all__ = [
     "fetch_market_micro", "fetch_index_trend", "fetch_market_macro", "fetch_stock_info",
     "fetch_sentiment", "fetch_news_headlines", "fetch_auction_quote", "fetch_minute_data",
@@ -31,4 +36,6 @@ __all__ = [
     "get_intraday_pm", "get_close", "get_mode_data", "search_history",
     "read_day", "read_minline", "read_day_tail", "iter_day_codes",
     "resolve_market", "day_file_path", "minline_file_path", "TdxError",
+    "compute_market_weather", "fetch_market_weather", "fetch_us_nasdaq",
+    "fetch_sector_heat", "fetch_extra_indices", "fetch_style_quad",
 ]

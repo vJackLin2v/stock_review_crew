@@ -40,6 +40,17 @@ def _http_json(path: str, params: dict[str, Any]) -> dict[str, Any]:
             resp = requests.get(_BASE + path, params=params, headers=_HEADERS, timeout=_TIMEOUT)
             resp.raise_for_status()
             return resp.json()
+        except requests.exceptions.ProxyError:
+            # 代理客户端未启动/挂掉：直连重试（国内接口直连可用）
+            try:
+                resp = requests.get(_BASE + path, params=params, headers=_HEADERS,
+                                    timeout=_TIMEOUT, proxies={"http": None, "https": None})
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < _RETRIES - 1:
+                    time.sleep(0.8)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < _RETRIES - 1:
@@ -137,6 +148,12 @@ def build_zt_block(date: str) -> dict[str, Any]:
     today = (cont.get("limit_up_count") or {}).get("today") or {}
     yesterday = (cont.get("limit_up_count") or {}).get("yesterday") or {}
     limit_down = (cont.get("limit_down_count") or {}).get("today") or {}
+    # 跌停为 0 只时，同花顺连板池接口会省略 limit_down_count.today.num 字段
+    # （无跌停股票即无该统计项）——此时缺省按 0，而非 None：
+    # 涨停池正常返回说明接口有响应，跌停缺省 0 语义是「0 只」，不是「数据缺失」。
+    limit_down_count = limit_down.get("num")
+    if limit_down_count is None:
+        limit_down_count = 0
     touched = today.get("history_num")
     zhaban = today.get("open_num")
     return {
@@ -148,7 +165,7 @@ def build_zt_block(date: str) -> dict[str, Any]:
                     if stocks else "涨停池为空",
         },
         "limit_down": {
-            "count": limit_down.get("num"),
+            "count": limit_down_count,
             "stocks": [],
             "note": "跌停明细由东财/其他源补充",
         },

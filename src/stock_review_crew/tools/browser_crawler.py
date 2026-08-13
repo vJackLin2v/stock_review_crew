@@ -40,6 +40,21 @@ def available() -> bool:
         return False
 
 
+def _proxy_available() -> bool:
+    """代理客户端是否在运行（127.0.0.1:7890）；未运行时不传代理直连。"""
+    import socket
+
+    s = socket.socket()
+    s.settimeout(1)
+    try:
+        s.connect(("127.0.0.1", 7890))
+        return True
+    except Exception:
+        return False
+    finally:
+        s.close()
+
+
 def _to_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -88,15 +103,15 @@ def fetch_ths_sector_rows(max_pages: int = 2, budget: float = 40.0) -> list[dict
     t0 = time.time()
     try:
         with sync_playwright() as p:
+            proxy_args = [f"--proxy-server={_PROXY}"] if _proxy_available() else []
             browser = p.chromium.launch(
                 channel="msedge",
                 headless=True,
                 args=[
-                    f"--proxy-server={_PROXY}",
                     "--no-sandbox",
                     "--disable-gpu",
                     "--disable-dev-shm-usage",
-                ],
+                ] + proxy_args,
             )
             try:
                 page = browser.new_page(user_agent=_UA)

@@ -8,6 +8,11 @@ import { num } from "./format.js";
 export const arr = (v) => (Array.isArray(v) ? v : []);
 const n = (v, d = 0) => num(v, d);
 const nullable = (v) => num(v, NaN);
+// 账户类字段判空：null/undefined/''/NaN → null（禁止 NaN 上屏），否则数值原样
+const nullableOrNull = (v) => {
+  const n = num(v, NaN);
+  return Number.isFinite(n) ? n : null;
+};
 const str = (v, d = "") => (v == null || v === "" ? d : String(v));
 
 export const DEFAULT_DISCLAIMER = "仅供参考，不构成投资建议";
@@ -255,4 +260,316 @@ export function normalizeChatSessionList(raw) {
       message_count: n(x.message_count),
     };
   });
+}
+
+// ---- R12 模拟账户（requirements-r12 契约）----
+export function normalizeAccountPosition(x = {}) {
+  const p = x && typeof x === "object" ? x : {};
+  return {
+    code: str(p.code),
+    name: str(p.name),
+    qty: nullable(p.qty),
+    available_qty: nullable(p.available_qty),
+    avg_cost: nullable(p.avg_cost),
+    price: nullable(p.price),
+    market_value: nullable(p.market_value),
+    pnl: nullableOrNull(p.pnl),
+    pnl_rate: nullableOrNull(p.pnl_rate),
+  };
+}
+
+export function normalizeAccountTrade(x = {}) {
+  const t = x && typeof x === "object" ? x : {};
+  const status = str(t.status);
+  return {
+    date: str(t.date),
+    time: str(t.time),
+    code: str(t.code),
+    name: str(t.name),
+    side: str(t.side),
+    qty: nullable(t.qty),
+    price: nullable(t.price),
+    amount: nullable(t.amount),
+    fee: nullable(t.fee),
+    stamp_tax: nullable(t.stamp_tax),
+    transfer_fee: nullable(t.transfer_fee),
+    status,
+    isRejected: status !== "成交",
+    reject_reason: str(t.reject_reason),
+    realized: nullable(t.realized),
+  };
+}
+
+export function normalizeAccountSnapshot(x = {}) {
+  const s = x && typeof x === "object" ? x : {};
+  return {
+    date: str(s.date),
+    cash: nullable(s.cash),
+    position_mv: nullable(s.position_mv),
+    total_assets: nullable(s.total_assets),
+    realized_pnl: nullableOrNull(s.realized_pnl),
+  };
+}
+
+// 2026-08-13：历史持仓（已平仓，字段契约与后端 closed_positions 对齐）
+export function normalizeClosedPosition(x = {}) {
+  const p = x && typeof x === "object" ? x : {};
+  return {
+    code: str(p.code),
+    name: str(p.name),
+    buy_qty: nullable(p.buy_qty),
+    sell_qty: nullable(p.sell_qty),
+    avg_buy_price: nullableOrNull(p.avg_buy_price),
+    avg_sell_price: nullableOrNull(p.avg_sell_price),
+    realized_pnl: nullableOrNull(p.realized_pnl),
+    first_buy_date: str(p.first_buy_date),
+    last_sell_date: str(p.last_sell_date),
+    holding_days: nullableOrNull(p.holding_days),
+  };
+}
+
+export function normalizeAccountDetail(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  return {
+    skill_id: str(x.skill_id || x.id),
+    name: str(x.name || x.skill_name),
+    cash: nullable(x.cash),
+    total_assets: nullable(x.total_assets),
+    total_return_rate: nullableOrNull(x.total_return_rate),
+    unrealized_pnl: nullableOrNull(x.unrealized_pnl),
+    realized_pnl: nullableOrNull(x.realized_pnl),
+    win_rate: nullableOrNull(x.win_rate),
+    profit_loss_ratio: nullableOrNull(x.profit_loss_ratio),
+    avg_holding_days: nullableOrNull(x.avg_holding_days),
+    positions: arr(x.positions).map(normalizeAccountPosition).filter((p) => p.code),
+    closed_positions: arr(x.closed_positions)
+      .map(normalizeClosedPosition)
+      .filter((p) => p.code),
+    trades: arr(x.trades).map(normalizeAccountTrade),
+    snapshots: arr(x.snapshots)
+      .map(normalizeAccountSnapshot)
+      .filter((s) => s.date),
+    updated_at: str(x.updated_at),
+  };
+}
+
+export function normalizeAccounts(raw) {
+  return arr(raw)
+    .map((x) => {
+      const a = x && typeof x === "object" ? x : {};
+      return {
+        skill_id: str(a.skill_id || a.id),
+        name: str(a.name || a.skill_name),
+        cash: nullable(a.cash),
+        total_assets: nullable(a.total_assets),
+        total_return_rate: nullableOrNull(a.total_return_rate),
+        unrealized_pnl: nullableOrNull(a.unrealized_pnl),
+        realized_pnl: nullableOrNull(a.realized_pnl),
+        win_rate: nullableOrNull(a.win_rate),
+        today_trades_count: nullable(a.today_trades_count),
+        updated_at: str(a.updated_at),
+      };
+    })
+    .filter((a) => a.skill_id);
+}
+
+// ---- R10 数据扩展 normalize（个股详情/自选/板块/情绪/天气/纳指等）----
+export function normalizeStockDetail(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  const quote = x.quote && typeof x.quote === "object" ? x.quote : {};
+  const daily = Array.isArray(x.daily)
+    ? x.daily.map((d) => ({
+        date: str(d.date || d["日期"]),
+        open: nullable(d.open ?? d["开盘"]),
+        close: nullable(d.close ?? d["收盘"]),
+        high: nullable(d.high ?? d["最高"]),
+        low: nullable(d.low ?? d["最低"]),
+        volume: nullable(d.volume ?? d["成交量"]),
+        pct_change: nullable(d.pct_change ?? d["涨跌幅"]),
+      }))
+    : [];
+  return {
+    code: str(x.code),
+    name: str(x.name || quote.name),
+    date: str(x.date),
+    quote: {
+      price: nullable(quote.price),
+      pre_close: nullable(quote.pre_close),
+      open: nullable(quote.open),
+      high: nullable(quote.high),
+      low: nullable(quote.low),
+      pct_change: nullable(quote.pct_change),
+      volume: nullable(quote.volume),
+      amount: nullable(quote.amount),
+    },
+    daily,
+    minute: Array.isArray(x.minute)
+      ? x.minute.map((m) => ({
+          time: str(m.time),
+          price: nullable(m.price),
+          avg: nullable(m.avg),
+          volume: nullable(m.volume),
+        }))
+      : [],
+    kline_5m: Array.isArray(x.kline_5m) ? x.kline_5m : [],
+    kline_1m: Array.isArray(x.kline_1m) ? x.kline_1m : [],
+    // 2026-08-11 修复：后端与 mock 均返回 ma:{ma5,ma10,ma20} 对象，
+    // 此前只映射顶层 ma5/ma10/ma20 导致 detail.ma 为 undefined，
+    // 详情页渲染崩溃（Cannot read properties of undefined (reading 'ma5')）。
+    ma: {
+      ma5: nullable((x.ma && x.ma.ma5) ?? x.ma5),
+      ma10: nullable((x.ma && x.ma.ma10) ?? x.ma10),
+      ma20: nullable((x.ma && x.ma.ma20) ?? x.ma20),
+    },
+    ma5: nullable((x.ma && x.ma.ma5) ?? x.ma5),
+    ma10: nullable((x.ma && x.ma.ma10) ?? x.ma10),
+    ma20: nullable((x.ma && x.ma.ma20) ?? x.ma20),
+    degraded: Boolean(x.degraded),
+    degraded_reason: arr(x.degraded_reason),
+  };
+}
+
+export function normalizeWatchlist(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  const list = Array.isArray(x.items) ? x.items : Array.isArray(x) ? x : [];
+  return list.map((w) => ({
+    code: str(w.code || w["代码"]),
+    name: str(w.name || w["名称"]),
+    price: nullable(w.price),
+    pct_change: nullable(w.pct_change ?? w["涨跌幅"]),
+    added_at: str(w.added_at),
+  }));
+}
+
+export function normalizeQuote(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  return {
+    code: str(x.code),
+    name: str(x.name),
+    price: nullable(x.price),
+    pre_close: nullable(x.pre_close),
+    open: nullable(x.open),
+    high: nullable(x.high),
+    low: nullable(x.low),
+    pct_change: nullable(x.pct_change),
+    volume: nullable(x.volume),
+    amount: nullable(x.amount),
+  };
+}
+
+export function normalizeMarketSentiment(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  return {
+    ...x,
+    up: nullable(x.up ?? x.up_count),
+    down: nullable(x.down ?? x.down_count),
+    limit_up: nullable(x.limit_up ?? x.limit_up_count),
+    limit_down: nullable(x.limit_down ?? x.limit_down_count),
+    red_rate: nullable(x.red_rate),
+    break_rate: nullable(x.break_rate ?? x.zhaban_rate),
+    avg_return: nullable(x.avg_return),
+    emotion_score: nullable(x.emotion_score),
+    emotion_label: str(x.emotion_label),
+    weather: str(x.weather),
+    date: str(x.date),
+    up_down_ratio: nullable(x.up_down_ratio),
+    limit_up_count: nullable(x.limit_up_count),
+    limit_down_count: nullable(x.limit_down_count),
+    lianban_height: nullable(x.lianban_height),
+    reasons: arr(x.reasons),
+    source: str(x.source),
+    degraded: Boolean(x.degraded),
+    degraded_reason: arr(x.degraded_reason),
+  };
+}
+
+export function normalizeSectorHeat(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  const mapRow = (s) => ({
+    name: str(s.name || s["板块"] || s.board),
+    pct_change: nullable(s.pct_change ?? s["涨跌幅"]),
+    amount: nullable(s.amount ?? s["成交额"]),
+    leader: str(s.leader || s["领涨股"]),
+  });
+  const hot = arr(x.hot ?? x.hot_sectors ?? x.top5).map(mapRow);
+  const cold = arr(x.cold ?? x.cold_sectors ?? x.bottom5).map(mapRow);
+  return {
+    ...x,
+    hot,
+    cold,
+    source: str(x.source),
+    degraded: Boolean(x.degraded),
+    degraded_reason: arr(x.degraded_reason),
+  };
+}
+
+export function normalizeMarketWeather(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  return {
+    weather: str(x.weather),
+    emotion_score: nullable(x.emotion_score),
+    emotion_label: str(x.emotion_label),
+    reasons: arr(x.reasons),
+    source: str(x.source),
+    degraded: Boolean(x.degraded),
+  };
+}
+
+export function normalizeExtraIndices(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  const list = Array.isArray(x.items)
+    ? x.items
+    : Array.isArray(x.indices)
+      ? x.indices
+      : Array.isArray(x)
+        ? x
+        : [];
+  const items = list.map((i) => ({
+    code: str(i.code),
+    name: str(i.name),
+    close: nullable(i.close),
+    pct_change: nullable(i.pct_change),
+  }));
+  return {
+    ...x,
+    items,
+    source: str(x.source),
+    degraded: Boolean(x.degraded),
+    degraded_reason: arr(x.degraded_reason),
+  };
+}
+
+export function normalizeMarketStyle(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  return {
+    ...x,
+    large: nullable(x.large ?? x.large_cap),
+    small: nullable(x.small ?? x.small_cap),
+    value: nullable(x.value),
+    growth: nullable(x.growth),
+    hot: arr(x.hot),
+    source: str(x.source),
+    degraded: Boolean(x.degraded),
+    degraded_reason: arr(x.degraded_reason),
+  };
+}
+
+export function normalizeUsNasdaq(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  const list = Array.isArray(x.items) ? x.items : Array.isArray(x) ? x : [];
+  const items = list.map((d) => ({
+    ...d,
+    date: str(d.date),
+    symbol: str(d.symbol),
+    is_today: d.is_today,
+    close: nullable(d.close),
+    pct_change: nullable(d.pct_change),
+  }));
+  return {
+    ...x,
+    items,
+    source: str(x.source),
+    degraded: Boolean(x.degraded),
+    degraded_reason: arr(x.degraded_reason),
+  };
 }

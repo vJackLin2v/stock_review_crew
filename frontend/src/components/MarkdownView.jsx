@@ -1,4 +1,32 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
+
+// P1-R：标题 slug 生成（与 buildToc 共用，保证目录与正文锚点 id 一致）
+function slugify(text, seen) {
+  const base = String(text || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+  const id0 = base || "section";
+  const n = seen[id0] || 0;
+  seen[id0] = n + 1;
+  return n ? `${id0}-${n + 1}` : id0;
+}
+
+// P1-R：解析 # / ## / ### 标题，生成目录数据（含锚点 id）
+export function buildToc(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const seen = {};
+  const toc = [];
+  for (const line of lines) {
+    const m = line.match(/^(#{1,3})\s+(.*)$/);
+    if (!m) continue;
+    const raw = String(m[2] || "").trim();
+    if (!raw) continue;
+    toc.push({ level: m[1].length, text: raw, id: slugify(raw, seen) });
+  }
+  return toc;
+}
 
 function inline(text, keyPrefix = "t") {
   const parts = [];
@@ -13,6 +41,7 @@ function inline(text, keyPrefix = "t") {
     if (tok.startsWith("**")) {
       parts.push(<strong key={key}>{tok.slice(2, -2)}</strong>);
     } else if (tok.startsWith("`")) {
+      // 行内代码不替换（防误伤：统计/示例数字保持原样）
       parts.push(<code key={key}>{tok.slice(1, -1)}</code>);
     } else if (tok.startsWith("[")) {
       const mm = tok.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
@@ -31,8 +60,11 @@ function inline(text, keyPrefix = "t") {
 }
 
 export default function MarkdownView({ text }) {
+  const raw = String(text || "");
+
   if (!text) return <div className="md-empty">暂无报告内容</div>;
-  const lines = String(text).split(/\r?\n/);
+  const lines = raw.split(/\r?\n/);
+  const seen = {};
   const blocks = [];
   let i = 0;
   while (i < lines.length) {
@@ -59,7 +91,12 @@ export default function MarkdownView({ text }) {
     }
     const h = line.match(/^(#{1,6})\s+(.*)$/);
     if (h) {
-      blocks.push({ type: `h${h[1].length}`, text: h[2] });
+      blocks.push({
+        type: `h${h[1].length}`,
+        text: h[2],
+        // P1-R：仅 1-3 级标题挂锚点 id（与 buildToc 一致）
+        id: h[1].length <= 3 ? slugify(h[2], seen) : undefined,
+      });
       i += 1;
       continue;
     }
@@ -109,11 +146,11 @@ export default function MarkdownView({ text }) {
         const key = `b-${bi}`;
         switch (b.type) {
           case "h1":
-            return <h1 key={key}>{inline(b.text, key)}</h1>;
+            return <h1 key={key} id={b.id}>{inline(b.text, key)}</h1>;
           case "h2":
-            return <h2 key={key}>{inline(b.text, key)}</h2>;
+            return <h2 key={key} id={b.id}>{inline(b.text, key)}</h2>;
           case "h3":
-            return <h3 key={key}>{inline(b.text, key)}</h3>;
+            return <h3 key={key} id={b.id}>{inline(b.text, key)}</h3>;
           case "h4":
           case "h5":
           case "h6":
@@ -150,7 +187,8 @@ export default function MarkdownView({ text }) {
             const rows = b.rows.map((r) => r.split("|").slice(1, -1).map((c) => c.trim()));
             const hasSep = rows.length > 1 && /^[\s\-:|]+$/.test(rows[1].join("|"));
             const head = hasSep ? rows[0] : null;
-            const body = hasSep ? rows.slice(2) : rows.slice(1);
+            // P1-Y：无分隔行时首行是数据而非表头，必须保留
+            const body = hasSep ? rows.slice(2) : rows;
             return (
               <table key={key}>
                 {head ? (

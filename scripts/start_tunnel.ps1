@@ -1,4 +1,4 @@
-# 一键启动：后端（.venv uvicorn:8502）+ Cloudflare Tunnel 快速隧道（无需服务器）
+﻿# 一键启动：后端（.venv uvicorn:8501）+ Cloudflare Tunnel 快速隧道（无需服务器）
 # 用法：powershell -ExecutionPolicy Bypass -File scripts\start_tunnel.ps1
 
 $ErrorActionPreference = "Stop"
@@ -8,12 +8,12 @@ Set-Location "H:\stock_review_crew"
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 
-# 1. 确保后端（.venv uvicorn:8502）在运行（8501 常被 synalysis 占用）
-if (-not (Get-NetTCPConnection -LocalPort 8502 -State Listen -ErrorAction SilentlyContinue)) {
-    Write-Host "启动后端服务（8502）..."
-    Start-Process "H:\stock_review_crew\.venv\Scripts\python.exe" `
-        -ArgumentList "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8502" `
-        -WorkingDirectory "H:\stock_review_crew" -WindowStyle Hidden
+# 1. 确保后端（.venv uvicorn:8501）在运行且带崩溃自动重启（守护脚本会先停旧实例）
+$watchdog = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like "*start_backend.ps1*" }
+if (-not $watchdog) {
+    Write-Host "启动后端守护（8501，崩溃自动重启）..."
+    Start-Process "powershell" -ArgumentList "-ExecutionPolicy", "Bypass", "-File", "H:\stock_review_crew\scripts\start_backend.ps1" -WindowStyle Hidden
     Start-Sleep -Seconds 7
 }
 
@@ -32,7 +32,7 @@ if (-not (Test-Path $cf)) {
 $log = "H:\stock_review_crew\.tmp\tunnel.log"
 $err = "H:\stock_review_crew\.tmp\tunnel.err"
 Remove-Item $log, $err -Force -ErrorAction SilentlyContinue
-Start-Process $cf -ArgumentList "tunnel", "--url", "http://127.0.0.1:8502", "--no-autoupdate" `
+Start-Process $cf -ArgumentList "tunnel", "--url", "http://127.0.0.1:8501", "--no-autoupdate" `
     -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err
 
 for ($i = 0; $i -lt 30; $i++) {

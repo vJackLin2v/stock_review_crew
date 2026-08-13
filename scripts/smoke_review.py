@@ -3,7 +3,7 @@
 
 用法（示例）：
     python scripts/smoke_review.py 2026-08-03 close
-    python scripts/smoke_review.py 2026-07-31 pre_market --port 8502
+    python scripts/smoke_review.py 2026-07-31 pre_market --port 8501
     python scripts/smoke_review.py 2026-08-03 auction --expect-window-error
 """
 
@@ -43,7 +43,7 @@ def call(opener, base: str, method: str, path: str, body=None, timeout: int = 30
             return e.code, raw
 
 
-def run_smoke(date: str, mode: str, port: int = 8502, expect_window_error: bool = False,
+def run_smoke(date: str, mode: str, port: int = 8501, expect_window_error: bool = False,
               max_rounds: int = 1, timeout: float = 480.0) -> dict:
     base = f"http://127.0.0.1:{port}"
     opener = urllib.request.build_opener(_proxy_handler())
@@ -91,7 +91,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("date")
     ap.add_argument("mode")
-    ap.add_argument("--port", type=int, default=8502)
+    ap.add_argument("--port", type=int, default=8501)
     ap.add_argument("--expect-window-error", action="store_true")
     ap.add_argument("--max-rounds", type=int, default=1)
     ap.add_argument("--timeout", type=float, default=480)

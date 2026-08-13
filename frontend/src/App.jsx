@@ -13,7 +13,12 @@ import Sidebar from "./components/Sidebar";
 import HomeView from "./components/HomeView";
 import ProgressView from "./components/ProgressView";
 import ReportView from "./components/ReportView";
-import ChatView from "./components/ChatView";
+import StockDetail from "./components/StockDetail";
+import SettingsView from "./components/SettingsView";
+// R12-A3：侧栏「模拟账户」独立视图（分析师模拟账户展示）
+import AccountsPanel from "./components/AccountsPanel";
+import { applyToDom, loadSettings } from "./settings";
+import { setNewsEnabled } from "./stages";
 
 export default function App() {
   const [collapsed, setCollapsed] = useState(() => {
@@ -24,8 +29,10 @@ export default function App() {
     }
   });
   const [sidebarOpen, setSidebarOpen] = useState(false); // 移动端抽屉
-  // 视图：home | progress | report | chat
+  // 视图：home | progress | report | stock | settings | accounts
   const [view, setView] = useState("home");
+  // R11-R1：首页 Tab（data | review | chat | trades），默认首个 Tab = 数据展示
+  const [homeTab, setHomeTab] = useState("data");
   // 运行中任务全局保留：切换视图不停止轮询、不丢失任务
   const [job, setJob] = useState(null);
   const [report, setReport] = useState(null);
@@ -35,12 +42,25 @@ export default function App() {
   const [history, setHistory] = useState({ groups: [], loading: true, error: null, offline: false });
   // 聊天
   const [chatSessions, setChatSessions] = useState([]);
+  const [chatSessionsLoading, setChatSessionsLoading] = useState(true);
   const [chatSessionsError, setChatSessionsError] = useState("");
+  const [stockQuery, setStockQuery] = useState(null); // {code, name, from}
   const [activeChatSessionId, setActiveChatSessionId] = useState(null);
   const [chatIntent, setChatIntent] = useState(null);
 
   const pollRef = useRef(null);
   const viewRef = useRef(view);
+
+  // 启动时应用本地设置（主题/涨跌配色/字号；图表周期由各视图自行读取）
+  useEffect(() => {
+    applyToDom(loadSettings());
+    // 2026-08-12：拉取后端资讯开关（NEWS_ENABLED），关闭时进度条隐藏「资讯」步骤；
+    // 失败保守显示（离线 mock 等场景），不阻塞首屏
+    fetch("/api/health")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setNewsEnabled(d.news_enabled))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     viewRef.current = view;
@@ -62,19 +82,29 @@ export default function App() {
         loading: false,
         error: null,
         offline: !!(res && res.offline),
+        onRetry: loadHistory,
       });
     } catch (err) {
-      setHistory({ groups: [], loading: false, error: err.message || "历史记录加载失败", offline: false });
+      setHistory({
+        groups: [],
+        loading: false,
+        error: err.message || "历史记录加载失败",
+        offline: false,
+        onRetry: loadHistory,
+      });
     }
   }, []);
 
   const loadChatSessions = useCallback(async () => {
+    setChatSessionsLoading(true);
     try {
       const res = await api.listChatSessions();
       setChatSessions(normalizeChatSessionList(res.data));
       setChatSessionsError("");
     } catch (err) {
       setChatSessionsError((err && err.message) || "会话列表加载失败");
+    } finally {
+      setChatSessionsLoading(false);
     }
   }, []);
 
@@ -85,7 +115,7 @@ export default function App() {
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
-  // 「新建复盘」（侧栏唯一入口）：只切换视图，进行中的任务继续轮询
+  // 「首页」（侧栏主按钮）：只切换视图，进行中的任务继续轮询
   const handleNew = useCallback(() => {
     setSidebarOpen(false);
     setReport(null);
@@ -107,12 +137,21 @@ export default function App() {
             stopPolling();
             if (norm.isDone) {
               const fresh = normalizeJobResult(norm.result);
-              setReport({ ...fresh, analyses: [], debate_history: [], offline: offlineFlag });
+              setReport((prev) => {
+                const sameRecord =
+                  prev &&
+                  prev.meta &&
+                  fresh.meta &&
+                  prev.meta.date === fresh.meta.date &&
+                  prev.meta.time === fresh.meta.time;
+                if (viewRef.current !== "progress" && !sameRecord) return prev;
+                return { ...fresh, analyses: [], debate_history: [], offline: offlineFlag };
+              });
               if (viewRef.current === "progress") setView("report");
               loadHistory();
               // 详情接口补全分析师点评与辩论记录（失败不阻塞报告展示）
               api
-                .getReviewDetail(fresh.meta.date, fresh.meta.time)
+                .getReviewByDate(fresh.meta.date)
                 .then((raw) => {
                   const detail = normalizeReviewDetail(raw);
                   setReport((prev) =>
@@ -170,11 +209,13 @@ export default function App() {
       setReportLoading(true);
       setView("report");
       try {
-        const raw = await api.getReviewDetail(date, time);
+        // R4 修复：每日一份存储，历史详情一律走单日接口（旧 /{date}/{time} 已移除 → 404）
+        const raw = await api.getReviewByDate(date);
         const detail = normalizeReviewDetail(raw);
+        const t = (detail.meta && detail.meta.time) || time || "";
         setReport({
           ...detail,
-          record_id: `${date}_${time}`,
+          record_id: `${date}_${t}`,
           offline: false,
         });
       } catch (err) {
@@ -226,16 +267,40 @@ export default function App() {
     });
   }, []);
 
-  // 聊天
+  // 聊天：统一跳首页「分析师聊天」Tab（会话全程在首页 Tab 内呈现）
   const handleOpenChat = useCallback((payload) => {
     setChatIntent(payload);
-    setView("chat");
+    setHomeTab("chat");
+    setView("home");
+  }, []);
+
+  const handleOpenStockDetail = useCallback((code, name) => {
+    setStockQuery({ code: String(code || "").trim(), name: String(name || ""), from: viewRef.current || "home" });
+    setView("stock");
+  }, []);
+
+  const handleCloseStockDetail = useCallback(() => {
+    const from = stockQuery && stockQuery.from ? stockQuery.from : "home";
+    setStockQuery(null);
+    setView(from);
+  }, [stockQuery]);
+
+  const handleOpenSettings = useCallback(() => {
+    setSidebarOpen(false);
+    setView("settings");
+  }, []);
+
+  // R12-A3：侧栏「模拟账户」→ 独立视图（AccountsPanel 自带返回）
+  const handleOpenAccounts = useCallback(() => {
+    setSidebarOpen(false);
+    setView("accounts");
   }, []);
 
   const handleSelectChatSession = useCallback((id) => {
     setChatIntent(null);
     setActiveChatSessionId(id);
-    setView("chat");
+    setHomeTab("chat");
+    setView("home");
   }, []);
 
   const handleDeleteChatSession = useCallback(
@@ -267,9 +332,11 @@ export default function App() {
         ? report
           ? `复盘报告 · ${report.meta.mode_label || ""}`
           : "复盘报告"
-        : view === "chat"
-          ? "分析师对话"
-          : "新建复盘";
+          : view === "accounts"
+            ? "模拟账户"
+          : view === "settings"
+            ? "设置"
+          : "首页";
 
   return (
     <ErrorBoundary onReset={handleNew}>
@@ -284,15 +351,22 @@ export default function App() {
           onToggle={toggleCollapsed}
           history={history}
           activeReviewKey={activeReviewKey}
-          onSelectReview={(k) => { setSidebarOpen(false); handleOpenReview(k); }}
+          // 2026-08-06 修复：Sidebar 回调签名是 (date, time) 双参；此前只取首个参数
+          // 导致 getReviewDetail(date, undefined) → /api/reviews/{date}/undefined → 404
+          // 「复盘记录不存在」（点击任意历史记录必现）。
+          onSelectReview={(date, time) => { setSidebarOpen(false); handleOpenReview(date, time); }}
           onNew={() => { setSidebarOpen(false); handleNew(); }}
           job={job}
           onBackToJob={() => { setSidebarOpen(false); handleBackToJob(); }}
           chatSessions={chatSessions}
           activeChatId={activeChatSessionId}
           onOpenChatSession={(id) => { setSidebarOpen(false); handleSelectChatSession(id); }}
+          // R11-R1：手动补做复盘入口（侧栏），复用全局 job 轮询
+          onStartReview={handleStartReview}
           onDeleteReview={handleDeleteReview}
           onDeleteChatSession={handleDeleteChatSession}
+          onOpenSettings={handleOpenSettings}
+          onOpenAccounts={handleOpenAccounts}
         />
         <main className="main">
           <header className="topbar">
@@ -332,27 +406,36 @@ export default function App() {
             ) : view === "progress" && job ? (
               <ProgressView job={job} onNew={handleNew} />
             ) : view === "report" && report ? (
-              <ReportView report={report} offline={!!report.offline} />
-            ) : view === "chat" ? (
-              <ChatView
-                sessions={chatSessions}
-                sessionsLoading={false}
-                sessionsError={chatSessionsError}
-                activeSessionId={activeChatSessionId}
-                intent={chatIntent}
-                onIntentConsumed={() => setChatIntent(null)}
-                onSelectSession={handleSelectChatSession}
-                onRefreshSessions={loadChatSessions}
-                onSessionCreated={handleSessionCreated}
+              <ReportView
+                report={report}
+                offline={!!report.offline}
+                history={history}
+                onSwitchReview={handleOpenReview}
               />
+            ) : view === "stock" && stockQuery ? (
+              <StockDetail query={stockQuery} onBack={handleCloseStockDetail} />
+            ) : view === "settings" ? (
+              <SettingsView />
+            ) : view === "accounts" ? (
+              <AccountsPanel onBack={handleNew} />
             ) : (
               <HomeView
-                onStartReview={handleStartReview}
-                onOpenReview={handleOpenReview}
-                onDeleteReview={handleDeleteReview}
+                homeTab={homeTab}
+                onHomeTabChange={setHomeTab}
                 history={history}
                 onRetryHistory={loadHistory}
+                onDeleteReview={handleDeleteReview}
                 onOpenChat={handleOpenChat}
+                onOpenStockDetail={handleOpenStockDetail}
+                chatSessions={chatSessions}
+                chatSessionsLoading={chatSessionsLoading}
+                chatSessionsError={chatSessionsError}
+                activeChatSessionId={activeChatSessionId}
+                chatIntent={chatIntent}
+                onChatIntentConsumed={() => setChatIntent(null)}
+                onSelectChatSession={handleSelectChatSession}
+                onRefreshChatSessions={loadChatSessions}
+                onChatSessionCreated={handleSessionCreated}
               />
             )}
           </div>

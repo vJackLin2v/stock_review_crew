@@ -128,6 +128,33 @@ def _futures(symbol):
 
 def _mock_all_success(monkeypatch):
     monkeypatch.setattr(sd.config, "KAIPANLA_COOKIE", "test=1")
+    import stock_review_crew.tools.realtime as rt_mod
+
+    monkeypatch.setattr(rt_mod, "fetch_indices", lambda: {"indices": []})
+    monkeypatch.setattr(rt_mod, "fetch_breadth_realtime",
+                        lambda: {"total": 4600, "up": 2800, "down": 1800, "flat": 0})
+
+    def _sectors_block():
+        return {
+            "top5": [{
+                "name": "半导体", "pct_change": 0.032, "amount": 1e9,
+                "leading_stock": "示例科技",
+                "raw": {"板块": "半导体", "涨跌幅": 3.2, "成交额": 1e9, "领涨股": "示例科技"},
+            }],
+            "bottom5": [{
+                "name": "保险", "pct_change": -0.03, "amount": 1e8,
+                "leading_stock": "示例保险",
+                "raw": {"板块": "保险", "涨跌幅": -3.0, "成交额": 1e8, "领涨股": "示例保险"},
+            }],
+            "bottom5_flow": [],
+            "units": sd._SECTOR_UNITS,
+            "source": "同花顺", "degraded": False, "degraded_reason": [],
+        }
+
+    for _n in ("_sectors_from_ths_today", "_sectors_from_tx_today",
+               "_sectors_from_browser_today", "_sectors_from_em_today"):
+        monkeypatch.setattr(sd, _n, _sectors_block)
+    monkeypatch.setattr(sd, "_futures_from_ak", lambda: {"IH": None, "IM": None})
     monkeypatch.setattr(sd, "_tx_index_daily", _tx_daily)
     monkeypatch.setattr(sd, "_em_zt_pool", _em_zt)
     monkeypatch.setattr(sd, "_em_zt_pool_zbgc", _em_zbgc)
@@ -146,6 +173,21 @@ def _mock_all_success(monkeypatch):
     monkeypatch.setattr(sd, "_http_get_json",
                         lambda url, params=None, headers=None, timeout=15:
                         [{"代码": "600001", "名称": "涨停王", "竞价涨幅": 1.0, "竞价金额": 1e8}])
+    # 2026-08-10 改动：fetch_sentiment 降级链 Tushare 优先（_sentiment_from_tushare 为首入口），
+    # 必须 mock，否则走真实网络（假代理下挂起）
+    monkeypatch.setattr(sd, "_sentiment_from_tushare", lambda date, prev_date=None: {
+        "yesterday": "2026-08-02", "today": date,
+        "yesterday_zt_count": 60, "matched_today": 50,
+        "avg_return": 0.10, "median_return": 0.08, "red_rate": 0.55,
+        "lianban_count": 5, "lianban_rate": 0.1,
+        "hean_count": 2, "hean_rate": 0.04,
+        "best3": [], "worst3": [],
+        "zhaban": 3, "touched": 10, "zhaban_rate": 0.3,
+        "up_count": 2800, "down_count": 1800, "up_down_ratio": 1.5556,
+        "raw": {"avg_return_pct": 10.0, "red_rate_pct": 55.0,
+                "lianban_rate_pct": 10.0, "hean_rate_pct": 4.0, "单位": "%"},
+        "source": "Tushare计算", "degraded": False, "degraded_reason": [],
+    })
 
 
 def _mock_all_fail(monkeypatch):
@@ -153,16 +195,25 @@ def _mock_all_fail(monkeypatch):
         raise RuntimeError("模拟离线失败")
     # 通达信本地兜底也禁用：与 .env TDX_PATH / F:\tdx 实际存在无关
     import stock_review_crew.config as cfg
+    import stock_review_crew.tools.realtime as rt_mod
+
     monkeypatch.setattr(cfg, "TDX_PATH", None)
     monkeypatch.setattr("stock_review_crew.tools.realtime.fetch_news", _raise)
+    monkeypatch.setattr(rt_mod, "fetch_indices", _raise)
+    monkeypatch.setattr(rt_mod, "fetch_breadth_realtime", _raise)
     for name in ("_tx_index_daily", "_em_zt_pool", "_em_zt_pool_zbgc", "_em_zt_pool_dtgc",
                  "_ts_daily", "_ts_stock_basic", "_ths_sector_summary", "_em_index_minute",
                  "_em_lhb", "_news_cctv", "_news_economic_baidu", "_news_caixin",
                  "_us_index_sina", "_foreign_realtime", "_futures_main_contract",
-                 "_legu_activity", "_http_get_json", "_em_zt_pool_previous", "_em_spot",
+                 "_futures_from_ak", "_legu_activity", "_http_get_json",
+                 "_em_zt_pool_previous", "_em_spot",
                  "_em_pre_min", "_em_stock_daily", "_em_sector_names", "_ths_sector_names",
                  "_em_sector_hist", "_ths_sector_hist", "_zt_pool_from_ths",
-                 "_sentiment_from_ths", "_sectors_from_browser_today", "_records_from_em_kline",
+                 "_sentiment_from_tushare", "_sentiment_from_ths",
+                 "_sentiment_from_realtime", "_sentiment_from_em",
+                 "_sectors_from_ths_today", "_sectors_from_tx_today",
+                 "_sectors_from_browser_today", "_sectors_from_em_today",
+                 "_records_from_em_kline",
                  "_records_from_tx_kline", "_minute_bars_from_tx", "_sectors_from_tx_today"):
         monkeypatch.setattr(sd, name, _raise, raising=False)
     monkeypatch.setattr(sd, "get_cache_dir", lambda: Path(__file__).parent / "no_such_cache")
@@ -224,6 +275,54 @@ def test_invalid_date_raises_chinese():
         sd.fetch_index_trend("2026/07/31")
 
 
+def test_index_partial_shenzhen_missing_ok(monkeypatch):
+    """2026-08-06 用户口径：复盘指数只保留 上证/创业板/科创50（深证成指已移除，
+    不再取数与展示）；必需指数（创业板+科创50）必须保障。"""
+
+    def _tx_daily_partial(symbol):
+        if symbol == "sz399001":  # 深证成指（非必需）失败
+            raise RuntimeError("深证源不可用（mock）")
+        return _tx_daily(symbol)
+
+    monkeypatch.setattr(sd, "_tx_index_daily", _tx_daily_partial)
+    monkeypatch.setattr(sd, "_records_from_em_kline", lambda symbol: None)
+    monkeypatch.setattr(sd, "_records_from_tx_kline", lambda symbol: None)
+    monkeypatch.setattr(sd, "get_cache_dir", lambda: Path(__file__).parent / "no_such_cache")
+    import stock_review_crew.config as cfg
+
+    monkeypatch.setattr(cfg, "TDX_PATH", None)
+
+    out = sd.fetch_index_trend("2026-07-31")
+    assert out["source"] != "数据缺失"
+    ind = out["indices"]
+    assert ind["shanghai"] is not None
+    assert ind["chuangye"] is not None
+    assert ind["kechuang"] is not None
+    assert "shenzhen" not in ind
+    assert out["degraded"] is False  # 深证不再参与取数，无缺失可降级
+
+
+def test_index_required_missing_still_data_missing(monkeypatch):
+    """创业板（必需）缺失 → 指数块仍判「数据缺失」（复盘 R7 终止口径不变）。"""
+
+    def _tx_daily_partial2(symbol):
+        if symbol == "sz399006":  # 创业板指（必需）失败
+            raise RuntimeError("创业板源不可用（mock）")
+        return _tx_daily(symbol)
+
+    monkeypatch.setattr(sd, "_tx_index_daily", _tx_daily_partial2)
+    monkeypatch.setattr(sd, "_records_from_em_kline", lambda symbol: None)
+    monkeypatch.setattr(sd, "_records_from_tx_kline", lambda symbol: None)
+    monkeypatch.setattr(sd, "get_cache_dir", lambda: Path(__file__).parent / "no_such_cache")
+    import stock_review_crew.config as cfg
+
+    monkeypatch.setattr(cfg, "TDX_PATH", None)
+
+    out = sd.fetch_index_trend("2026-07-31")
+    assert out["source"] == "数据缺失"
+    assert out["indices"]["chuangye"] is None
+
+
 def test_zt_pool_ratios_decimal(monkeypatch):
     _mock_all_success(monkeypatch)
     out = sd.fetch_zt_pool(TODAY)
@@ -253,6 +352,11 @@ def test_breadth_decimal(monkeypatch):
     assert out["up"] == 2 and out["down"] == 0
     assert out["up_down_ratio"] is None  # 无下跌 → None 而非 0
     assert out["limit_up"] == 1
+    # P0-2：分布键名必须为含 % 规范键（与前端 BREADTH_ORDER 对齐）
+    assert set(out["distribution"]) == {
+        "涨停", "跌停", "涨5%-10%", "涨2%-5%", "涨0%-2%",
+        "平盘", "跌0%-2%", "跌2%-5%", "跌5%以上",
+    }
 
 
 # ── @tool 包装 ──

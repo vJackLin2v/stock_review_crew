@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import * as echarts from "echarts";
 import { fmtCount, fmtPct, num } from "../format";
+import { paletteOf, useSettings } from "../settings";
 
-const ACCENT = "#10A37F";
-// 红涨绿跌：正红 / 负绿 / 零中性灰
-const UP_RED = "#e03131";
-const DOWN_GREEN = "#0ca678";
+// R12：图表主色与全局强调色（紫）保持一致
+const ACCENT = "#6859cf";
+// 涨跌配色跟随设置（红涨绿跌默认 / 绿涨红跌可切换）；零中性灰固定
 const NEUTRAL = "#adb5bd";
 const TEXT2 = "#7a7f87";
 
@@ -48,6 +48,7 @@ export function Chart({ option, height = 320, emptyText = "暂无数据" }) {
 
 // 指数分时（中文 tooltip，含较开盘涨跌）
 export function IndexMinuteChart({ indices }) {
+  const palette = paletteOf(useSettings().upDownColors);
   const rows = useMemo(
     () =>
       (Array.isArray(indices) ? indices : [])
@@ -62,6 +63,8 @@ export function IndexMinuteChart({ indices }) {
   );
   const option = useMemo(() => {
     if (!rows.length) return { series: [] };
+    const UP_RED = palette.up;
+    const DOWN_GREEN = palette.down;
     const times = rows[0].points.map((p) => p.time);
     return {
       tooltip: {
@@ -124,7 +127,7 @@ export function IndexMinuteChart({ indices }) {
             : undefined,
       })),
     };
-  }, [rows]);
+  }, [rows, palette]);
   return <Chart option={option} height={320} emptyText="暂无指数分时数据" />;
 }
 
@@ -132,6 +135,7 @@ const LADDER_ORDER = ["首板", "2板", "3板", "4板", "5板+"];
 
 // 涨跌停梯队（红涨绿跌）
 export function LimitLadderChart({ ladder }) {
+  const palette = paletteOf(useSettings().upDownColors);
   const rows = useMemo(() => {
     const up = Array.isArray(ladder && ladder.up) ? ladder.up : [];
     const down = Array.isArray(ladder && ladder.down) ? ladder.down : [];
@@ -142,24 +146,37 @@ export function LimitLadderChart({ ladder }) {
       const x = list.find((v) => v.label === label);
       return x && x.count != null ? num(x.count) : null;
     };
+    const stocksOf = (label) => {
+      const upRow = up.find((x) => x.label === label);
+      const downRow = down.find((x) => x.label === label);
+      const list = (upRow && upRow.stocks) || (downRow && downRow.stocks) || [];
+      return (Array.isArray(list) ? list : []).filter(Boolean).slice(0, 5);
+    };
     return {
       labels,
       up: labels.map((l) => at(up, l)),
       down: labels.map((l) => at(down, l)),
+      // P1-L：龙头名单（如首板）已取数但 tooltip 未展示，这里透传给 tooltip
+      stocks: labels.map(stocksOf),
     };
   }, [ladder]);
   const option = useMemo(() => {
     if (!rows.labels.length) return { series: [] };
+    const UP_RED = palette.up;
+    const DOWN_GREEN = palette.down;
     return {
       tooltip: {
         ...baseTooltip,
         trigger: "axis",
         formatter(params) {
           const i = params[0].dataIndex;
-          let html = `<b>${rows.labels[i]}</b>`;
+          const label = rows.labels[i];
+          let html = `<b>${label}</b>`;
           params.forEach((pp) => {
             html += `<br/>${pp.seriesName}：<b>${pp.value == null ? "—" : pp.value}</b> 家`;
           });
+          const stocks = rows.stocks[i];
+          html += `<br/>${label}个股：<b>${stocks.length ? stocks.join("、") : "—"}</b>`;
           return html;
         },
       },
@@ -192,12 +209,13 @@ export function LimitLadderChart({ ladder }) {
         },
       ],
     };
-  }, [rows]);
+  }, [rows, palette]);
   return <Chart option={option} height={300} emptyText="暂无涨跌停梯队数据" />;
 }
 
 // 板块涨幅榜（红涨绿跌，中文 tooltip）
 export function SectorChart({ sectors }) {
+  const palette = paletteOf(useSettings().upDownColors);
   const rows = useMemo(
     () =>
       (Array.isArray(sectors) ? sectors : [])
@@ -213,6 +231,8 @@ export function SectorChart({ sectors }) {
   );
   const option = useMemo(() => {
     if (!rows.length) return { series: [] };
+    const UP_RED = palette.up;
+    const DOWN_GREEN = palette.down;
     const names = rows.map((r) => r.name).reverse();
     return {
       tooltip: {
@@ -267,25 +287,30 @@ export function SectorChart({ sectors }) {
         },
       ],
     };
-  }, [rows]);
+  }, [rows, palette]);
   return <Chart option={option} height={300} emptyText="暂无板块数据" />;
 }
 
 const SENTIMENT_ITEMS = [
-  { key: "red_rate", label: "红盘率" },
-  { key: "continue_rate", label: "连板率" },
-  { key: "break_rate", label: "炸板率" },
-  { key: "button_rate", label: "核按钮率" },
+  // P1-J：比率类（0-1 区间）用中性蓝，不参与红涨绿跌；方向性指标（avg_return）才用红绿。
+  // break_rate/button_rate 为负向指标，tooltip 注明「比率越高越负面」。
+  { key: "red_rate", label: "红盘率", ratio: true },
+  { key: "continue_rate", label: "连板率", ratio: true },
+  { key: "break_rate", label: "炸板率", ratio: true, negative: true },
+  { key: "button_rate", label: "核按钮率", ratio: true, negative: true },
   { key: "avg_return", label: "昨日涨停平均收益" },
 ];
 
 // 情绪指标（比率 ×100 展示，None → —）
 export function SentimentChart({ sentiment }) {
+  const palette = paletteOf(useSettings().upDownColors);
   const rows = useMemo(
     () =>
       SENTIMENT_ITEMS.map((it) => ({
         label: it.label,
         value: sentiment ? num(sentiment[it.key], NaN) : NaN,
+        ratio: !!it.ratio,
+        negative: !!it.negative,
       })),
     [sentiment]
   );
@@ -293,6 +318,9 @@ export function SentimentChart({ sentiment }) {
   const udr = sentiment ? num(sentiment.up_down_ratio, NaN) : NaN;
   const option = useMemo(() => {
     if (!rows.some((r) => Number.isFinite(r.value))) return { series: [] };
+    const UP_RED = palette.up;
+    const DOWN_GREEN = palette.down;
+    const RATIO_BLUE = "#5c7cfa"; // 比率类中性蓝（不暗示涨跌方向）
     return {
       tooltip: {
         ...baseTooltip,
@@ -301,8 +329,9 @@ export function SentimentChart({ sentiment }) {
           const r = rows[params[0].dataIndex];
           const v = r.value;
           if (!Number.isFinite(v)) return `<b>${r.label}</b><br/>数值：—`;
-          const color = v > 0 ? UP_RED : v < 0 ? DOWN_GREEN : NEUTRAL;
-          return `<b>${r.label}</b><br/>数值：<b style="color:${color}">${(v * 100).toFixed(2)}%</b>`;
+          const color = r.ratio ? RATIO_BLUE : v > 0 ? UP_RED : v < 0 ? DOWN_GREEN : NEUTRAL;
+          const note = r.negative ? "<br/>（比率越高越负面）" : "";
+          return `<b>${r.label}</b><br/>数值：<b style="color:${color}">${(v * 100).toFixed(2)}%</b>${note}`;
         },
       },
       grid: { left: 120, right: 46, top: 18, bottom: 28 },
@@ -335,13 +364,13 @@ export function SentimentChart({ sentiment }) {
           data: rows.map((r) => {
             if (!Number.isFinite(r.value)) return { value: null };
             const v = Math.round(r.value * 10000) / 100;
-            const color = r.value > 0 ? UP_RED : r.value < 0 ? DOWN_GREEN : NEUTRAL;
+            const color = r.ratio ? RATIO_BLUE : r.value > 0 ? UP_RED : r.value < 0 ? DOWN_GREEN : NEUTRAL;
             return { value: v, itemStyle: { color, borderRadius: [0, 3, 3, 0] } };
           }),
         },
       ],
     };
-  }, [rows]);
+  }, [rows, palette]);
   return (
     <div>
       {Number.isFinite(udr) ? (
@@ -351,6 +380,86 @@ export function SentimentChart({ sentiment }) {
       ) : null}
       <Chart option={option} height={300} emptyText="暂无情绪指标数据" />
     </div>
+  );
+}
+
+// R11-7：全市场涨跌分布（分布区间柱状图，红涨绿跌）
+const BREADTH_ORDER = [
+  "跌停", "跌5%以上", "跌2%-5%", "跌0%-2%", "平盘",
+  "涨0%-2%", "涨2%-5%", "涨5%-10%", "涨停",
+];
+
+export function BreadthChart({ breadth }) {
+  const palette = paletteOf(useSettings().upDownColors);
+  // P1-H：分布降级（distribution 空/备用源）时，空态必须标注来源，禁止静默空图
+  const srcLabel = (breadth && breadth.source) || "数据缺失";
+  const rows = useMemo(() => {
+    const dist = (breadth && breadth.distribution) || {};
+    return BREADTH_ORDER.map((label) => ({
+      label,
+      value: num(dist[label], NaN),
+    })).filter((r) => Number.isFinite(r.value));
+  }, [breadth]);
+
+  const option = useMemo(() => {
+    if (!rows.length) return { series: [] };
+    return {
+      tooltip: {
+        ...baseTooltip,
+        trigger: "axis",
+        formatter(params) {
+          const r = rows[params[0].dataIndex];
+          return `<b>${r.label}</b><br/>家数：<b>${fmtCount(r.value)}</b>`;
+        },
+      },
+      grid: { left: 92, right: 46, top: 18, bottom: 28 },
+      xAxis: {
+        type: "value",
+        axisLabel: { color: TEXT2 },
+        splitLine: { lineStyle: { color: "#eef0ec" } },
+      },
+      yAxis: {
+        type: "category",
+        data: rows.map((r) => r.label),
+        axisLine: { lineStyle: { color: "#d8dad5" } },
+        axisLabel: { color: TEXT2, fontSize: 11 },
+      },
+      series: [
+        {
+          name: "家数",
+          type: "bar",
+          barMaxWidth: 16,
+          label: {
+            show: true,
+            position: "right",
+            formatter: (p) => fmtCount(rows[p.dataIndex].value),
+            color: TEXT2,
+            fontSize: 10.5,
+          },
+          itemStyle: {
+            color: (p) => {
+              const label = rows[p.dataIndex].label;
+              if (label === "涨停" || label.includes("涨")) return palette.up;
+              if (label === "跌停" || label.includes("跌")) return palette.down;
+              return NEUTRAL;
+            },
+          },
+          data: rows.map((r) => r.value),
+        },
+      ],
+    };
+  }, [rows, palette]);
+
+  return (
+    // P1-N：去掉内部 .chart-card/.chart-title（ReportView 的 chart-block 已带标题），
+    // 与其他四图保持一致
+    rows.length ? (
+      <Chart option={option} height={250} />
+    ) : (
+      <div className="chart-empty" style={{ height: 250 }}>
+        数据缺失（来源：{srcLabel}）
+      </div>
+    )
   );
 }
 

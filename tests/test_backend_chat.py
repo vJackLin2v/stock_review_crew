@@ -28,6 +28,10 @@ import backend.main as bm
 
 client = TestClient(bm.app)
 
+# R8 流水线脚本化输出：parse/need 阶段返回结构化 JSON，分析/总结返回文本。
+PARSE_JSON = '{"intent": "trend", "target": "600519", "time_range": "近5日"}'
+NEED_JSON = '[{"data_key": "stock_info", "reason": "看近期走势"}]'
+
 
 @pytest.fixture(autouse=True)
 def no_llm_key():
@@ -85,11 +89,26 @@ def offline(monkeypatch):
         chat, "_fetch_target_data",
         lambda target_type, target: {"available": False, "note": "数据暂时不可用（离线测试）", "data": None},
     )
+    # R8 取数层：离线确定性，任一 data_key 返回可用 mock 块（取数失败路径由引擎单测覆盖）
+    monkeypatch.setattr(
+        chat, "_fetch_data",
+        lambda key, parse, meta, data_fetcher=None: {
+            "key": key, "available": True, "data": {"mock": True, "source": "离线mock"},
+            "source": "离线mock", "note": None,
+        },
+    )
     monkeypatch.setattr(
         chat, "search_chat_history",
         lambda q, n_results=5: {"available": False, "note": "历史对话检索不可用（离线测试）", "data": None},
     )
     monkeypatch.setattr(chat, "save_chat_history", lambda *args, **kwargs: False)
+    # R11 R9：默认引擎 searcher=None 会走真实 tools.search（联网）→ 离线确定性：
+    # stub 搜索整理链路（等价 test_chat_engine/r8 注入 searcher=no_search，杜绝
+    # 网络可用时搜索结果触发额外 LLM 调用导致 mock 序号偏移的偶发失败）。
+    monkeypatch.setattr(
+        chat.ChatEngine, "_search_and_brief",
+        lambda self, parse, content, llm, degraded: "（未联网搜索）",
+    )
     monkeypatch.setattr(
         chat.ChatEngine, "_search_review",
         lambda self, q: {"available": False, "note": "复盘检索不可用（离线测试）", "data": None},
@@ -99,7 +118,10 @@ def offline(monkeypatch):
 # ── 会话全链路：建会话 → 发消息（disclaimer 断言）→ 列表过滤 → 详情 → 删除 → 404 ──
 
 def test_chat_full_chain(iso_dirs, monkeypatch):
-    monkeypatch.setattr(chat, "_get_default_llm", lambda: FakeLLM(["首答", "表态", "汇总"]))
+    monkeypatch.setattr(
+        chat, "_get_default_llm",
+        lambda: FakeLLM([PARSE_JSON, NEED_JSON, NEED_JSON, "首答", "表态", "汇总"]),
+    )
 
     r = client.post(
         "/api/chat/sessions",
@@ -114,7 +136,8 @@ def test_chat_full_chain(iso_dirs, monkeypatch):
     r = client.post(f"/api/chat/sessions/{sid}/messages", json={"content": "大盘怎么看？"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert set(body) == {"session_id", "messages", "disclaimer"}
+    # R10 Q4：响应可选附 quality（无凭据/评估失败时为 None 或缺失，此处断言不破坏核心契约）
+    assert set(body) >= {"session_id", "messages", "disclaimer"}
     assert body["session_id"] == sid
     assert body["disclaimer"] == "仅供参考，不构成投资建议"
     msgs = body["messages"]
@@ -250,7 +273,10 @@ def test_chat_validation_400_404(iso_dirs):
 # ── 单分析师会话（normalizeChatMessage 的 analyst_name 语义）──
 
 def test_chat_single_analyst_reply(iso_dirs, monkeypatch):
-    monkeypatch.setattr(chat, "_get_default_llm", lambda: FakeLLM(["单分析师回答"]))
+    monkeypatch.setattr(
+        chat, "_get_default_llm",
+        lambda: FakeLLM([PARSE_JSON, NEED_JSON, "单分析师回答", "单分析师总结"]),
+    )
     r = client.post(
         "/api/chat/sessions",
         json={"target_type": "stock", "target": "600519", "analysts": ["alang"], "title": "单分析师"},
@@ -267,7 +293,10 @@ def test_chat_single_analyst_reply(iso_dirs, monkeypatch):
 # ── SSE 流式端点：事件序列完整 → done（含免责声明与全量消息）──
 
 def test_chat_stream_sse_events(iso_dirs, monkeypatch):
-    monkeypatch.setattr(chat, "_get_default_llm", lambda: FakeStreamLLM(["首答", "表态", "汇总"]))
+    monkeypatch.setattr(
+        chat, "_get_default_llm",
+        lambda: FakeStreamLLM([PARSE_JSON, NEED_JSON, NEED_JSON, "首答", "表态", "汇总"]),
+    )
     r = client.post(
         "/api/chat/sessions",
         json={"target_type": "stock", "target": "600519", "analysts": ["alang", "yangjia"], "title": "流式测试"},
@@ -290,11 +319,15 @@ def test_chat_stream_sse_events(iso_dirs, monkeypatch):
 
     ev_names = [e["event"] for e in events]
     for required in (
-        "meta", "user_msg", "analyst_start", "analyst_delta", "analyst_end",
+        "meta", "user_msg", "stage", "analyst_start", "analyst_delta", "analyst_end",
         "summary_start", "summary_delta", "summary_end", "done",
     ):
         assert required in ev_names, f"缺少事件 {required}: {ev_names}"
     assert ev_names[-1] == "done"
+    # stage 事件顺序与内容：parse → need → fetch → summarize，不携带数据清单
+    stage_events = [json.loads(e["data"]) for e in events if e["event"] == "stage"]
+    assert [s["stage"] for s in stage_events] == ["parse", "need", "fetch", "summarize"]
+    assert all("data_key" not in s for s in stage_events)
 
     done = json.loads(events[-1]["data"])
     assert done["session_id"] == sid

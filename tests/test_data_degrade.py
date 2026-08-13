@@ -41,6 +41,12 @@ def test_cache_used_when_sources_fail(monkeypatch):
 
     monkeypatch.setattr(sd, "_ts_daily", _raise)
     monkeypatch.setattr(sd, "_legu_activity", _raise)
+    # 2026-08-11：补 mock 盘中实时源（fetch_market_breadth 降级链第二环），
+    # 真实网络可用时该源会成功返回导致断言失败（PLAYBOOK 降级测试环境耦合教训）
+    monkeypatch.setattr(
+        "stock_review_crew.tools.realtime.fetch_breadth_realtime",
+        lambda: (_ for _ in ()).throw(RuntimeError("离线")),
+    )
     out = sd.fetch_market_breadth("2026-07-31")
     assert out["source"] == "本地缓存"
     assert out["degraded"] is True
@@ -56,6 +62,10 @@ def test_legacy_market_micro_conversion(monkeypatch):
     monkeypatch.setenv("STOCK_DATA_CACHE_DIR", str(cache))
     monkeypatch.setattr(sd, "_tx_index_daily",
                         lambda s: (_ for _ in ()).throw(RuntimeError("离线")))
+    monkeypatch.setattr(sd, "_records_from_em_kline",
+                        lambda s: (_ for _ in ()).throw(RuntimeError("东财日K离线")))
+    monkeypatch.setattr(sd, "_records_from_tx_kline",
+                        lambda s: (_ for _ in ()).throw(RuntimeError("腾讯日K离线")))
     monkeypatch.setattr(sd.tdx_local, "read_day",
                         lambda *a, **k: (_ for _ in ()).throw(
                             sd.tdx_local.TdxError("文件不存在")))
@@ -73,6 +83,10 @@ def test_legacy_sectors_cache(monkeypatch):
     seed_legacy_sectors(cache, "2026-07-31")
     monkeypatch.setenv("STOCK_DATA_CACHE_DIR", str(cache))
     monkeypatch.setattr(sd, "_ths_sector_summary",
+                        lambda: (_ for _ in ()).throw(RuntimeError("离线")))
+    # 2026-08-11：历史板块路径实际走 _ths_sector_names_line（v4/v6 line 直连，
+    # 2026-08-10 新增），补 mock 使降级链在真实网络下也确定走缓存
+    monkeypatch.setattr(sd, "_ths_sector_names_line",
                         lambda: (_ for _ in ()).throw(RuntimeError("离线")))
     monkeypatch.setattr(sd, "_em_sector_names",
                         lambda: (_ for _ in ()).throw(RuntimeError("离线")))

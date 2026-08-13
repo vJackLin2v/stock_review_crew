@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
-"""旧 output/ 复盘导入脚本（Issue I4 / requirements §一.5、§七 Q10）。
+"""旧 output/ 复盘导入脚本（Issue I4 / requirements §一.5、§七 Q10；R11 R4 每日一份）。
 
-把 output/{date}/复盘_{HHMMSS}.md 幂等导入为
-data/reviews/{date}/{HHMMSS}/{meta.json, report.json, snapshot.json}：
+把 output/{date}/复盘_{HHMMSS}.md 幂等导入为每日一份：
+data/reviews/{date}/{meta.json, report.json, snapshot.json}（R11 R4 新结构）：
 
 - 模式按文件时间点推断：<09:15 pre_market / 09:15-09:25 auction /
   09:30-11:30 intraday_am / 11:30-13:00 noon / 13:00-15:00 intraday_pm / >=15:00 close；
   09:25-09:30 空档及其它非法时间点归入 close，并在 meta.mode_note 标注原因；
+- 同一日期存在多份旧复盘时，按「每日一份」契约仅导入最新时间点一份，较早版本
+  保留在 output/ 源目录并明确提示（历史版本可自行归档）；
 - report.json 写入 final_report（整份 md 内容），analysts[] 尽力从「### 分析师名」段落解析，
   debate_history 无法从旧文件还原，置空数组；
 - snapshot 缺失，以 meta/snapshot 中的 imported_from_legacy 标注；
-- 幂等：目标目录已存在且 meta 含 imported_from_legacy 则跳过，--force 可重导；
+- 幂等：目标日期已有记录（新结构或旧多份结构）且 meta 含 imported_from_legacy 则跳过，
+  --force 可重导（覆盖前自动把旧版完整目录归档到 output/archive/{date}_{HHMMSS}/）；
 - 全部中文输出；目录创建健壮（已存在不报错）。
 
 用法：
@@ -35,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from stock_review_crew.storage.reviews import (  # noqa: E402
     DEFAULT_DISCLAIMER,
     MODE_LABELS,
+    has_review,
     reviews_root,
     save_review,
 )
@@ -177,8 +181,8 @@ def import_one(
         return {"status": "error", "reason": f"文件或日期目录不合法：{md_path}"}
     time = m.group(1)
     mode, note = infer_mode(time)
-    target = reviews_root() / date / time
-    exists = (target / "meta.json").exists()
+    target = reviews_root() / date  # R11 R4：每日一份（日期目录即记录目录）
+    exists = has_review(date)
 
     if exists and not force:
         meta = _read_meta_robust(target)
@@ -190,7 +194,7 @@ def import_one(
             }
         return {
             "status": "skipped",
-            "reason": "目标已存在但非旧数据导入记录，跳过（如需覆盖请加 --force）",
+            "reason": "目标已存在（每日一份），跳过（如需覆盖请加 --force）",
             "target": str(target),
         }
 
@@ -266,28 +270,42 @@ def run_import(
             continue
         if date is not None and date_dir.name != date:
             continue
+        file_list = []
         for md_path in sorted(date_dir.iterdir(), key=lambda p: p.name):
             if not md_path.is_file() or md_path.suffix.lower() != ".md":
                 continue
-            if not _FILE_RE.match(md_path.name):
+            fm = _FILE_RE.match(md_path.name)
+            if not fm:
                 print(f"⚠️ 跳过不匹配文件：{md_path.name}（应为 复盘_HHMMSS.md）")
                 stats["invalid"] += 1
                 continue
-            stats["scanned"] += 1
-            result = import_one(md_path, force=force, dry_run=dry_run)
-            status = result["status"]
-            stats[status if status in ("imported", "skipped", "dry_run", "error") else "errors"] += 1
-            label = MODE_LABELS.get(result.get("mode", "close"), "复盘")
-            if status == "imported":
-                prefix = "⚠️ 覆盖导入" if result.get("overwritten") else "✅ 导入"
-                print(f"{prefix} {date_dir.name} {result.get('record_id', '')}（{label}）→ {result['target']}")
-            elif status == "skipped":
-                print(f"⏭️ 跳过 {date_dir.name} {md_path.stem}：{result['reason']}")
-            elif status == "dry_run":
-                verb = "覆盖" if result.get("overwritten") else "导入"
-                print(f"🔍 将{verb} {date_dir.name} {md_path.stem}（{label}）→ {result['target']}")
-            else:
-                print(f"❌ 失败 {result.get('path', md_path)}：{result['reason']}")
+            file_list.append((fm.group(1), md_path))
+        if not file_list:
+            continue
+        file_list.sort()  # 按 HHMMSS 升序，最新一份在最后
+        latest_time, latest_path = file_list[-1]
+        stats["scanned"] += len(file_list)  # 全部有效文件计入扫描
+        for old_time, old_path in file_list[:-1]:
+            # R11 R4：同一日期多份旧复盘仅保留最新时间点（较早版本保留在 output/ 源目录）
+            stats["skipped"] += 1
+            print(
+                f"⏭️ 跳过 {date_dir.name} {old_path.stem}：同一日期多份旧复盘"
+                f"（每日一份），仅保留最新时间点 {latest_time}，较早版本保留在 output/ 源目录"
+            )
+        result = import_one(latest_path, force=force, dry_run=dry_run)
+        status = result["status"]
+        stats[status if status in ("imported", "skipped", "dry_run", "error") else "errors"] += 1
+        label = MODE_LABELS.get(result.get("mode", "close"), "复盘")
+        if status == "imported":
+            prefix = "⚠️ 覆盖导入" if result.get("overwritten") else "✅ 导入"
+            print(f"{prefix} {date_dir.name} {result.get('record_id', '')}（{label}）→ {result['target']}")
+        elif status == "skipped":
+            print(f"⏭️ 跳过 {date_dir.name} {latest_path.stem}：{result['reason']}")
+        elif status == "dry_run":
+            verb = "覆盖" if result.get("overwritten") else "导入"
+            print(f"🔍 将{verb} {date_dir.name} {latest_path.stem}（{label}）→ {result['target']}")
+        else:
+            print(f"❌ 失败 {result.get('path', latest_path)}：{result['reason']}")
 
     verb = "预览" if dry_run else "完成"
     print(

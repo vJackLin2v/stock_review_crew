@@ -1,3 +1,4 @@
+// 离线 mock 仅用于 DEV/CI 演示，生产走真实后端；与真实契约的差异以 normalize.js 为准
 // 离线 mock 数据（仅 DEV 降级 / 无后端演示用）
 // 结构严格对齐 requirements §五 API 契约：
 //   比率一律小数（0.5=50%）、None=null、日期 YYYY-MM-DD、时间点 HHMMSS、
@@ -17,7 +18,7 @@ export const ANALYSTS = [
 
 const pad = (x) => String(x).padStart(2, "0");
 
-export function isoDate(d) {
+export function isoDate(d = new Date()) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
@@ -109,16 +110,19 @@ function buildSnapshot(date, mode, rng) {
     { label: "5板+", count: 0 },
   ];
 
-  // 板块涨幅（小数，正红负绿）
-  const sectors = SECTOR_POOL.slice()
+  // 板块涨幅（小数，正红负绿）；P1-K：跌幅榜 sectors_bottom 同步样例
+  const sectorPool = SECTOR_POOL.slice()
     .sort(() => rng() - 0.5)
     .slice(0, 10)
     .map((name, i) => ({
       name,
       pct_change: round4((rng() - 0.38) * 0.065),
       leader: `领涨示例${i + 1}`,
-    }))
-    .sort((a, b) => b.pct_change - a.pct_change);
+    }));
+  const sectors = [...sectorPool].sort((a, b) => b.pct_change - a.pct_change);
+  const sectors_bottom = [...sectorPool]
+    .sort((a, b) => a.pct_change - b.pct_change)
+    .slice(0, 5);
 
   // 情绪指标（口径 §六.5：炸板率=炸板÷摸板、红盘率、连板率、核按钮率、昨日涨停平均收益）
   const upCount = 2800 + Math.floor(rng() * 700);
@@ -140,12 +144,37 @@ function buildSnapshot(date, mode, rng) {
     source: "东财/Tushare 计算（mock 演示）",
     degraded: ["炸板率按当日摸板数估算（mock 演示）"],
   };
+  // R11-7：涨跌分布（分布区间柱状图）
+  const breadth = {
+    total: upCount + downCount + 120,
+    up: upCount,
+    down: downCount,
+    flat: 120,
+    limit_up: limitUp,
+    limit_down: limitDown,
+    zhaban_rate: round4((touched - limitUp) / touched),
+    distribution: {
+      "涨停": limitUp,
+      "跌停": limitDown,
+      "涨5%-10%": 90 + Math.floor(rng() * 60),
+      "涨2%-5%": 380 + Math.floor(rng() * 200),
+      "涨0%-2%": Math.floor(upCount * 0.62),
+      "平盘": 120,
+      "跌0%-2%": Math.floor(downCount * 0.76),
+      "跌2%-5%": 220 + Math.floor(rng() * 120),
+      "跌5%以上": 30 + Math.floor(rng() * 25),
+    },
+    source: "Tushare 计算（mock 演示）",
+    degraded: [],
+  };
 
   return {
     index_minute: indexMinute,
     limit_ladder: { up: upLadder, down: downLadder },
     sectors,
+    sectors_bottom,
     sentiment,
+    breadth,
     source: "东财/同花顺/Tushare（mock 演示数据）",
     degraded: ["竞价数据源未配置 KAIPANLA_COOKIE，竞价块走降级链标注（mock 演示）"],
   };
@@ -167,7 +196,7 @@ function buildReport(date, mode, snapshot, meta) {
     "## 一、市场概览",
     "",
     `- 指数：${idx.name} 收于 **${last ? last.value.toFixed(2) : "—"}**，较开盘 ${indexPct >= 0 ? "+" : ""}${pct(indexPct)}；`,
-    `- 涨跌家数：上涨 **${s.up_count}** 家 / 下跌 ${s.down_count} 家，涨跌家数比 ${(s.up_down_ratio * 100).toFixed(1)}%；`,
+    `- 涨跌家数：上涨 **${s.up_count}** 家 / 下跌 ${s.down_count} 家，涨跌家数比 ${s.up_down_ratio != null ? `${s.up_down_ratio.toFixed(2)} : 1` : "—"}；`,
     `- 涨停 ${s.limit_up_count} 家 / 跌停 ${s.limit_down_count} 家，炸板率 ${pct(s.break_rate)}，连板率 ${pct(s.continue_rate)}。`,
     "",
     "## 二、板块与资金",
@@ -192,35 +221,35 @@ function buildReport(date, mode, snapshot, meta) {
 function buildAnalysts(mode, degraded, rng) {
   const base = [
     {
-      skill_name: "趋势派·老周",
+      skill_name: "趋势派·阿狼",
       skill_id: "trend_zhou",
       analysis: "**趋势视角：** 指数分时重心上移，午后若回踩不破早盘低点则趋势延续。\n\n- 板块轮动较快，资金更偏向低位补涨方向；\n- 连板梯队保持完整，高度板回封说明接力情绪尚可。",
       suggestion: "关注指数 5 日均线得失，回踩不破可持有；破位则先降仓避险。",
       tags: ["顺势而为", "均线纪律"],
     },
     {
-      skill_name: "趋势派·小林",
+      skill_name: "趋势派·爱在冰川",
       skill_id: "trend_lin",
       analysis: "**结构视角：** 今日量能较昨日温和放大，指数波动区间收敛，属于震荡偏强结构。\n\n- 领涨板块由题材切换至权重，说明资金在做高低切换；\n- 尾盘若守住分时均价线，明日仍有惯性。",
       suggestion: "高低切换阶段避免追高当日已大涨板块，优先潜伏次日轮动方向。",
       tags: ["结构分析", "高低切换"],
     },
     {
-      skill_name: "情绪派·阿凯",
+      skill_name: "情绪派·炒股养家",
       skill_id: "sentiment_kai",
       analysis: `**情绪量化：** 红盘率 ${(0.647 * 100).toFixed(1)}%、连板率 ${(0.31 * 100).toFixed(1)}%，情绪处于中高位。\n\n- 炸板率偏高，说明分歧加大，接力需谨慎；\n- 昨日涨停今日平均收益转正，赚钱效应尚可。`,
       suggestion: "情绪高位分歧期，控制连板接力仓位，优先做首板与低吸。",
       tags: ["数据驱动", "情绪周期"],
     },
     {
-      skill_name: "情绪派·陈姐",
+      skill_name: "情绪派·铁锤狂砸盘",
       skill_id: "sentiment_chen",
       analysis: "**风险视角：** 跌停家数与核按钮率可控，但高位股尾盘有松动迹象。\n\n- 若明日高标集体断板，情绪将进入退潮期；\n- 当前仓位建议不超过六成，留出应对退潮的现金。",
       suggestion: "退潮信号确认前不加仓，若高标核按钮率抬升则果断离场。",
       tags: ["风险第一", "仓位管理"],
     },
     {
-      skill_name: "情绪派·大熊",
+      skill_name: "情绪派·拔小弦",
       skill_id: "sentiment_xiong",
       analysis: "**盘感点评：** 今天市场属于「指数稳、个股浪」的格局，涨停家数不少但连板梯度一般。\n\n- 炸板率不低说明追高资金在挨打，低吸资金在吃肉；\n- 这种行情最怕手痒乱追，管住手就赢了一半。",
       suggestion: "次日优先看竞价情绪：高开太多不追，低开缩量可吸。",
@@ -242,18 +271,18 @@ function buildDebate(rng) {
       round: 1,
       topic: "当前情绪处于中高位，追高与低吸如何取舍？",
       responses: [
-        { skill_name: "趋势派·老周", response: "趋势未破，回踩低吸优于追高，重点看指数分时均线支撑。" },
-        { skill_name: "情绪派·阿凯", response: "连板率尚可但炸板率偏高，分歧加大，建议降低连板接力仓位。" },
-        { skill_name: "情绪派·陈姐", response: "高标尾盘松动是退潮前兆，仓位控制在六成以内更稳妥。" },
+        { skill_name: "趋势派·阿狼", response: "趋势未破，回踩低吸优于追高，重点看指数分时均线支撑。" },
+        { skill_name: "情绪派·炒股养家", response: "连板率尚可但炸板率偏高，分歧加大，建议降低连板接力仓位。" },
+        { skill_name: "情绪派·铁锤狂砸盘", response: "高标尾盘松动是退潮前兆，仓位控制在六成以内更稳妥。" },
       ],
     },
     {
       round: 2,
       topic: "次日板块轮动方向如何预判？",
       responses: [
-        { skill_name: "趋势派·小林", response: "资金高低切换明显，低位权重与二线题材补涨概率更大。" },
-        { skill_name: "情绪派·大熊", response: "同意，追涨当日强势板块容易吃面，潜伏低位更划算。" },
-        { skill_name: "情绪派·阿凯", response: "补充：若竞价阶段板块高开超 2%，需警惕冲高回落。" },
+        { skill_name: "趋势派·爱在冰川", response: "资金高低切换明显，低位权重与二线题材补涨概率更大。" },
+        { skill_name: "情绪派·拔小弦", response: "同意，追涨当日强势板块容易吃面，潜伏低位更划算。" },
+        { skill_name: "情绪派·炒股养家", response: "补充：若竞价阶段板块高开超 2%，需警惕冲高回落。" },
       ],
     },
   ];
@@ -272,7 +301,7 @@ export function buildMockReviewDetail({ date, mode, time = null, max_rounds = 2 
   ];
   const s = snapshot.sentiment;
   const summary =
-    `${modeLabel(modeCode)}：指数震荡偏强，涨跌家数比 ${(s.up_down_ratio * 100).toFixed(1)}%，` +
+    `${modeLabel(modeCode)}：指数震荡偏强，涨跌家数比 ${s.up_down_ratio != null ? `${s.up_down_ratio.toFixed(2)} : 1` : "—"}，` +
     `涨停 ${s.limit_up_count} 家、炸板率 ${(s.break_rate * 100).toFixed(1)}%，情绪中高位分歧（mock 演示）`;
   const meta = {
     date,
@@ -420,6 +449,43 @@ export function mockSearchStocks(q) {
   ].filter((s) => !text || s.name.includes(text) || s.code.includes(text)).slice(0, 5);
 }
 
+// 个股详情 mock（结构同 GET /api/data/stock/{code}，供离线演示 R9 详情视图）
+export function mockStockDetail(code, days = 60) {
+  const c = String(code || "600519").trim().padStart(6, "0");
+  const q = mockStockQuote(c);
+  const daily = [];
+  const now = new Date();
+  for (let i = days; i >= 0; i -= 1) {
+    const d = new Date(now.getTime() - i * 86400000).toISOString().slice(0, 10);
+    const base = q.price * (1 - (days - i) * 0.002);
+    daily.push({
+      date: d, open: base * 0.995, high: base * 1.01, low: base * 0.99,
+      close: base, volume: 100000 + i * 100, amount: base * 100000 * 100,
+    });
+  }
+  const minute = [];
+  for (let m = 0; m < 48; m += 1) {
+    minute.push({ time: `09:${String(m % 60).padStart(2, "0")}`, close: q.price * (1 - 0.01 + m * 0.0004), volume: 100, amount: 1000 });
+  }
+  const mkKline = (step, count) =>
+    Array.from({ length: count }, (_, i) => ({
+      date: "2026-08-04", time: `${String(9 + Math.floor(i / 12))}:${String((i % 12) * step).padStart(2, "0")}`,
+      datetime: `2026-08-04 ${String(9 + Math.floor(i / 12))}:${String((i % 12) * step).padStart(2, "0")}`,
+      open: q.price * 0.998, high: q.price * 1.005, low: q.price * 0.995, close: q.price,
+      volume: 100, amount: 1000,
+    }));
+  const closes = daily.map((d) => d.close);
+  const ma = (n) => (closes.length >= n ? closes.slice(-n).reduce((a, b) => a + b, 0) / n : null);
+  return {
+    code: c, date: now.toISOString().slice(0, 10),
+    quote: { ...q, bids: [{ price: q.price * 0.999, volume: 5 }], asks: [{ price: q.price * 1.001, volume: 3 }] },
+    daily, minute, kline_5m: mkKline(5, 96), kline_1m: mkKline(1, 240),
+    ma: { ma5: ma(5), ma10: ma(10), ma20: ma(20) },
+    sources: { quote: "离线mock", daily: "离线mock", minute: "离线mock", kline_5m: "离线mock", kline_1m: "离线mock" },
+    degraded: [], updated_at: now.toISOString().slice(0, 19).replace("T", " "),
+  };
+}
+
 // 历史列表种子（按日期分组、同日多份、倒序）
 export function seedMockReviews(today = new Date()) {
   const map = new Map();
@@ -513,9 +579,9 @@ export function seedMockChatSessions(today = new Date()) {
         content:
           "综合三位分析师意见：板块情绪仍在高位但分歧加大，午后冲高需放量确认，缩量冲高建议减仓兑现。",
         analyst_parts: [
-          { skill_name: "趋势派·老周", content: "分时重心未破，若午后放量突破早盘高点可看高一线，否则视为震荡。" },
-          { skill_name: "趋势派·小林", content: "资金正在高低切换，半导体属于昨日强势方向，追高风险大于收益。" },
-          { skill_name: "情绪派·阿凯", content: "板块内炸板率偏高，情绪分歧期冲高容易回落，建议等回踩。" },
+          { skill_name: "趋势派·阿狼", content: "分时重心未破，若午后放量突破早盘高点可看高一线，否则视为震荡。" },
+          { skill_name: "趋势派·爱在冰川", content: "资金正在高低切换，半导体属于昨日强势方向，追高风险大于收益。" },
+          { skill_name: "情绪派·炒股养家", content: "板块内炸板率偏高，情绪分歧期冲高容易回落，建议等回踩。" },
         ],
         created_at: `${date}T10:12:08`,
       },
@@ -608,4 +674,200 @@ export function mockChatSessionList(sessions, { target = "", date = "" } = {}) {
       message_count: s.messages.length,
     }))
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+}
+
+// ==================== R10 mock（结构对齐 requirements-r10 §二/§三 契约） ====================
+
+// ---- F3 市场天气/情绪温度（手算样例：r=0.67→+15；d=75→+14；炸板0.20→+10；
+//      连板5→+10；红盘率0.68→+10；score=50+15+14+10+10+10=109→clamp 100→晴/火热）----
+export function buildMockMarketWeather(date = isoDate(new Date())) {
+  return {
+    date,
+    weather: "晴",
+    emotion_score: 100,
+    emotion_label: "火热",
+    reasons: [
+      "涨跌家数比 0.67：+15",
+      "涨停 80 家、跌停 5 家：+14",
+      "炸板率 0.20：+10",
+      "连板高度 5：+10",
+      "昨日涨停红盘率 0.68：+10",
+    ],
+    source: "规则引擎（基于现有行情快照）",
+    degraded: false,
+    degraded_reason: [],
+  };
+}
+
+// ---- F6 纳斯达克（.IXIC 综合 + .NDX 纳指100，近 60 交易日走势）----
+function mockNasdaqPoints(base, rng) {
+  const points = [];
+  for (let i = 59; i >= 0; i -= 1) {
+    const d = new Date(Date.now() - i * 86400000);
+    const wave = Math.sin(i / 6.5) * 0.018 + Math.cos(i / 11) * 0.01 + (rng() - 0.5) * 0.004;
+    points.push({
+      date: isoDate(d),
+      close: round2(base * (1 + wave + (59 - i) * 0.0004)),
+    });
+  }
+  return points;
+}
+
+export function buildMockUsNasdaq() {
+  const rng = mulberry32(hashStr("nasdaq:r10"));
+  const ixPoints = mockNasdaqPoints(17200, rng);
+  const ndxPoints = mockNasdaqPoints(20600, rng);
+  return {
+    items: [
+      {
+        name: "纳斯达克综合",
+        symbol: ".IXIC",
+        close: ixPoints[ixPoints.length - 1].close,
+        pct_change: round4(0.0123),
+        pre_close: round2(17474.6),
+        open: null,
+        high: null,
+        low: null,
+        points: ixPoints,
+        is_today: true,
+      },
+      {
+        name: "纳指100",
+        symbol: ".NDX",
+        close: ndxPoints[ndxPoints.length - 1].close,
+        pct_change: round4(0.0187),
+        pre_close: round2(20954.2),
+        open: null,
+        high: null,
+        low: null,
+        points: ndxPoints,
+        is_today: true,
+      },
+    ],
+    source: "新浪/东财",
+    degraded: false,
+    degraded_reason: [],
+  };
+}
+
+// ---- F5 板块温度榜（hot/cold 各 top5，含领涨股）----
+export function buildMockSectorHeat() {
+  return {
+    hot: [
+      { name: "半导体", pct_change: 0.023, leader: "中芯国际" },
+      { name: "算力租赁", pct_change: 0.019, leader: "鸿博股份" },
+      { name: "通信设备", pct_change: 0.016, leader: "中兴通讯" },
+      { name: "机器人", pct_change: 0.014, leader: "汇川技术" },
+      { name: "创新药", pct_change: 0.012, leader: "恒瑞医药" },
+    ],
+    cold: [
+      { name: "煤炭", pct_change: -0.015, leader: "中国神华" },
+      { name: "银行", pct_change: -0.011, leader: "招商银行" },
+      { name: "石油", pct_change: -0.009, leader: "中国石油" },
+      { name: "房地产", pct_change: -0.007, leader: "万科A" },
+      { name: "钢铁", pct_change: -0.005, leader: "宝钢股份" },
+    ],
+    source: "东财行业",
+    degraded: false,
+    degraded_reason: [],
+  };
+}
+
+// ---- F2 额外指数（平均股价/微盘股/高股息，通达信指数代码）----
+export function buildMockExtraIndices() {
+  return {
+    items: [
+      { name: "平均股价", code: "880003", close: 22.15, pct_change: 0.008, source: "通达信指数" },
+      { name: "微盘股", code: "880823", close: 1680.35, pct_change: -0.012, source: "通达信指数" },
+      { name: "高股息", code: "880522", close: 3050.12, pct_change: 0.005, source: "通达信指数" },
+    ],
+    source: "AKShare",
+    degraded: false,
+    degraded_reason: [],
+  };
+}
+
+// ---- F4 风格坐标（大盘 vs 小盘、价值 vs 成长）----
+export function buildMockMarketStyle() {
+  return {
+    large_vs_small: {
+      score: 62,
+      label: "大盘占优",
+      desc: "沪深300 +0.8%，中证1000 -0.3%",
+    },
+    value_vs_growth: {
+      score: 45,
+      label: "均衡",
+      desc: "价值/成长数据缺失或接近",
+    },
+    source: "指数代理+全市场PE分档",
+    degraded: false,
+    degraded_reason: [],
+  };
+}
+
+// ---- F9 观察列表（本地文件 data/watchlist.json 的前端 mock 镜像）----
+const WATCHLIST_SEED = [
+  { code: "600519", name: "贵州茅台", note: "", pinned: true, created_at: localIso() },
+  { code: "000858", name: "五粮液", note: "", pinned: false, created_at: localIso() },
+  { code: "300750", name: "宁德时代", note: "", pinned: false, created_at: localIso() },
+];
+
+let mockWatchlist = null;
+
+export function seedMockWatchlist() {
+  if (!mockWatchlist) {
+    mockWatchlist = WATCHLIST_SEED.map((x) => ({ ...x }));
+  }
+  return mockWatchlist;
+}
+
+export function mockWatchlistList() {
+  // 保持存储顺序（PUT /order 为唯一排序依据；pinned 只是置顶标记，不参与排序）
+  return seedMockWatchlist().slice().map((x) => ({ ...x }));
+}
+
+export function mockWatchlistAdd(code, note = "") {
+  const list = seedMockWatchlist();
+  const c = String(code || "").trim();
+  if (!/^\d{6}$/.test(c)) {
+    throw new Error("股票代码格式不正确，应为 6 位数字");
+  }
+  if (list.some((x) => x.code === c)) {
+    throw new Error("该股票已在观察列表中"); // 对齐后端 409 中文
+  }
+  const item = {
+    code: c,
+    name: `示例股${c.slice(-3)}`,
+    note: String(note || ""),
+    pinned: false,
+    created_at: localIso(),
+  };
+  list.push(item);
+  return { ...item };
+}
+
+export function mockWatchlistDelete(code) {
+  const list = seedMockWatchlist();
+  const idx = list.findIndex((x) => x.code === String(code || "").trim());
+  if (idx < 0) {
+    throw new Error("该股票不在观察列表中"); // 对齐后端 404 中文
+  }
+  list.splice(idx, 1);
+  return undefined; // 204
+}
+
+export function mockWatchlistReorder(codes) {
+  const list = seedMockWatchlist();
+  const wanted = Array.isArray(codes)
+    ? codes.map((c) => String(c || "").trim()).filter(Boolean)
+    : [];
+  const byCode = new Map(list.map((x) => [x.code, x]));
+  const ordered = wanted
+    .filter((c) => byCode.has(c))
+    .map((c) => byCode.get(c));
+  // 缺失代码忽略；未出现在请求中的（理论上后端会忽略）保留在末尾
+  const rest = list.filter((x) => !ordered.includes(x));
+  mockWatchlist = [...ordered, ...rest];
+  return { codes: mockWatchlist.map((x) => x.code) };
 }

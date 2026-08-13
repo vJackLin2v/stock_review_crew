@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { fmtDate, fmtTimeHM } from "../format";
 import { stageLabel } from "../stages";
+import { DEFAULT_MODE, MODES, modeLabel, todayStr } from "../modes";
 
 export default function Sidebar({
   collapsed,
@@ -18,11 +19,21 @@ export default function Sidebar({
   onOpenChatSession,
   onDeleteReview,
   onDeleteChatSession,
+  onOpenSettings,
+  onStartReview,
+  // R12-A3：侧栏「模拟账户」入口
+  onOpenAccounts,
 }) {
   const [confirmReviewKey, setConfirmReviewKey] = useState(null);
   const [confirmChatId, setConfirmChatId] = useState(null);
   const [busyKey, setBusyKey] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
+  // R11-R1：手动补做复盘入口（原首页「新建复盘」表单迁移到侧栏）
+  const [bfOpen, setBfOpen] = useState(false);
+  const [bfDate, setBfDate] = useState(todayStr());
+  const [bfMode, setBfMode] = useState(DEFAULT_MODE);
+  const [bfBusy, setBfBusy] = useState(false);
+  const [bfError, setBfError] = useState("");
 
   const groups = history.groups || [];
   const sessions = Array.isArray(chatSessions) ? chatSessions : [];
@@ -74,6 +85,25 @@ export default function Sidebar({
   const jobState = job ? job.status : null;
   const jobPct = job && Number.isFinite(Number(job.pct)) ? Math.round(Number(job.pct)) : 0;
 
+  const handleBackfill = async () => {
+    if (!onStartReview) return;
+    if (!bfDate) {
+      setBfError("请选择复盘日期");
+      return;
+    }
+    setBfBusy(true);
+    setBfError("");
+    try {
+      await onStartReview({ date: bfDate, mode: bfMode });
+      setBfOpen(false);
+      if (onCloseMobile) onCloseMobile();
+    } catch (err) {
+      setBfError((err && err.message) || "提交失败，请稍后重试");
+    } finally {
+      setBfBusy(false);
+    }
+  };
+
   return (
     <aside className={`sidebar${collapsed ? " collapsed" : ""}${open ? " mobile-open" : ""}`}>
       <div className="brand">
@@ -90,10 +120,65 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* 新建复盘：侧栏唯一主按钮 */}
-      <button className="btn btn-accent new-btn" onClick={onNew} title="新建复盘">
-        <span className="new-icon">＋</span>
-        <span className="new-text">新建复盘</span>
+      {/* 2026-08-07：侧栏主按钮文案「新建复盘」→「首页」，去掉 + 号图标 */}
+      <button className="btn btn-accent new-btn" onClick={onNew} title="首页">
+        <span className="new-text">首页</span>
+      </button>
+
+      {/* R11-R1：手动补做复盘（历史日期 / 任意模式） */}
+      <button
+        className="btn btn-outline new-btn backfill-btn"
+        onClick={() => {
+          setBfOpen((o) => !o);
+          setBfError("");
+        }}
+        title="补做复盘"
+      >
+        <span className="new-text">{bfOpen ? "收起补做" : "补做复盘"}</span>
+      </button>
+      {bfOpen ? (
+        <div className="backfill-panel">
+          <div className="backfill-title">补做复盘</div>
+          <p className="backfill-sub">历史日期可补做任意模式；数据源无历史时按降级链标注缺失并继续</p>
+          <label className="form-label" htmlFor="backfill-date">复盘日期</label>
+          <input
+            id="backfill-date"
+            type="date"
+            className="form-input"
+            value={bfDate}
+            onChange={(e) => setBfDate(e.target.value)}
+          />
+          <label className="form-label" style={{ marginTop: 10 }} htmlFor="backfill-mode">时间模式</label>
+          <select
+            id="backfill-mode"
+            className="form-input form-select backfill-select"
+            value={bfMode}
+            onChange={(e) => setBfMode(e.target.value)}
+          >
+            {MODES.map((m) => (
+              <option key={m.code} value={m.code}>
+                {m.label}（{m.window}）
+              </option>
+            ))}
+          </select>
+          {bfError ? <div className="sidebar-del-error">{bfError}</div> : null}
+          <button
+            className="btn btn-accent btn-sm backfill-go"
+            disabled={bfBusy}
+            onClick={handleBackfill}
+          >
+            {bfBusy ? "提交中…" : `开始${modeLabel(bfMode)}`}
+          </button>
+        </div>
+      ) : null}
+
+      {/* R12-A3：分析师模拟账户独立视图入口 */}
+      <button
+        className="btn btn-outline new-btn"
+        onClick={pick(onOpenAccounts)}
+        title="模拟账户"
+      >
+        <span className="new-text">模拟账户</span>
       </button>
 
       {/* 运行中任务指示器：切换视图不丢任务，一键回到进度/结果 */}
@@ -168,6 +253,7 @@ export default function Sidebar({
                         <button
                           className="hist-del"
                           title="删除该复盘"
+                          aria-label={`删除复盘 ${fmtTimeHM(it.time)} ${it.mode_label}`}
                           disabled={busyKey !== null}
                           onClick={(e) => askDeleteReview(e, key)}
                         >
@@ -227,6 +313,7 @@ export default function Sidebar({
                     <button
                       className="hist-del"
                       title="删除该会话"
+                      aria-label={`删除会话 ${s.title || s.target_name || s.target}`}
                       disabled={busyKey !== null}
                       onClick={(e) => askDeleteChat(e, id)}
                     >
@@ -260,10 +347,21 @@ export default function Sidebar({
       </div>
 
       <div className="sidebar-footer">
-        <button className="collapse-btn" onClick={onToggle} title={collapsed ? "展开侧栏" : "收起侧栏"}>
-          <span className="collapse-icon">{collapsed ? "☰" : "◀"}</span>
-          <span className="collapse-text">{collapsed ? "展开" : "收起侧栏"}</span>
-        </button>
+        <div className="sidebar-footer-actions">
+          <button className="collapse-btn" onClick={onOpenSettings} title="设置" aria-label="打开设置">
+            <span className="collapse-icon">⚙</span>
+            <span className="collapse-text">设置</span>
+          </button>
+          <button
+            className="collapse-btn"
+            onClick={onToggle}
+            title={collapsed ? "展开侧栏" : "收起侧栏"}
+            aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
+          >
+            <span className="collapse-icon">{collapsed ? "☰" : "◀"}</span>
+            <span className="collapse-text">{collapsed ? "展开" : "收起侧栏"}</span>
+          </button>
+        </div>
       </div>
     </aside>
   );

@@ -175,6 +175,8 @@ def test_source_timeout_degrades_chain(monkeypatch):
                         lambda d: (_ for _ in ()).throw(RuntimeError("备用失败")))
     monkeypatch.setattr(sd, "_em_zt_pool_dtgc",
                         lambda d: (_ for _ in ()).throw(RuntimeError("备用失败")))
+    monkeypatch.setattr(sd, "_zt_pool_from_ths",
+                        lambda d: (_ for _ in ()).throw(RuntimeError("同花顺失败（离线）")))
     monkeypatch.setattr(sd, "_ts_daily", lambda d: (_ for _ in ()).throw(
         sd.DataSourceError("未配置 TUSHARE_TOKEN")))
     start = time.monotonic()

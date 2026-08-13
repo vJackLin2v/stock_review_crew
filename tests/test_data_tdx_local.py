@@ -3,6 +3,7 @@
 import os
 import struct
 import sys
+import datetime
 from pathlib import Path
 
 import pytest
@@ -186,7 +187,9 @@ def test_tdx_readonly_no_write():
 def test_real_tdx_read_day():
     out = tdx_local.read_day("sh000001", tdx_path=r"F:\tdx")
     assert out["record_count"] > 100
-    assert out["date_end"] <= "2026-08-03"
+    # 本地通达信数据会随行情更新（2026-08-10 实测已到 08-10），
+    # 断言改为「覆盖近期且不晚于今天」，避免写死日期过时
+    assert "2026-07-01" <= out["date_end"] <= datetime.date.today().isoformat()
     assert out["records"][0]["close"] > 0
 
 

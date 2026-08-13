@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""I4 旧 output 导入脚本测试：模式推断 / 分析师解析 / 幂等 / dry-run / 隔离。
+"""I4 旧 output 导入脚本测试（R11 R4：每日一份）：模式推断 / 分析师解析 / 幂等 / dry-run / 隔离。
 
-导入目标一律指向 pytest 临时目录（STOCK_REVIEW_DATA_DIR），绝不触碰仓库 data/。
+导入目标一律指向 pytest 临时目录（STOCK_REVIEW_DATA_DIR / STOCK_REVIEW_ARCHIVE_DIR），
+绝不触碰仓库 data/ 与 output/。
 """
 
 import importlib.util
@@ -131,38 +132,38 @@ def test_infer_mode(imp, time_str, expected):
 def test_import_basic_structure(imp, fixture_output, iso_dir, monkeypatch):
     root = iso_dir / "reviews"
     monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(root))
+    monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(iso_dir / "archive"))
     stats = imp.run_import(fixture_output)
 
     assert stats["scanned"] == 4
-    assert stats["imported"] == 4
-    assert stats["skipped"] == 0
+    assert stats["imported"] == 2  # 每日一份：2026-07-31 取最新 150500、2026-07-30 取 091000
+    assert stats["skipped"] == 2  # 2026-07-31 较早两份（103813/092600）仅保留最新时间点
     assert stats["invalid"] == 2  # 复盘_bad.md + not-a-date 目录
 
-    entry = root / "2026-07-31" / "103813"
+    # R11 R4：目标为每日一份（日期目录直接含 meta/report/snapshot），最新时间点胜出
+    entry = root / "2026-07-31"
     meta = json.loads((entry / "meta.json").read_text(encoding="utf-8"))
-    assert meta["mode"] == "intraday_am"
-    assert meta["mode_label"] == "上午盘中"
+    assert meta["time"] == "150500"
+    assert meta["mode"] == "close"
+    assert meta["mode_label"] == "收盘复盘"
     assert meta["imported_from_legacy"] is True
-    assert meta["source_file"].endswith("复盘_103813.md")
+    assert meta["source_file"].endswith("复盘_150500.md")
     assert meta["summary"]
     assert isinstance(meta["degraded"], list) and meta["degraded"]
+    assert not (root / "2026-07-31" / "103813").exists()  # 旧时间点子目录不存在
 
     report = json.loads((entry / "report.json").read_text(encoding="utf-8"))
-    assert report["final_report"] == SAMPLE_MD
-    assert report["analysts"] == ["阿狼", "拔小弦", "爱在冰川", "铁锤狂砸盘", "炒股养家"]
+    assert report["final_report"] == "收盘文件"
+    assert report["analysts"] == []
     assert report["debate_history"] == []
 
     snapshot = json.loads((entry / "snapshot.json").read_text(encoding="utf-8"))
     assert snapshot["imported_from_legacy"] is True
 
-    # 09:25-09:30 空档 → close + 标注
-    meta_gap = json.loads((root / "2026-07-31" / "092600" / "meta.json").read_text(encoding="utf-8"))
-    assert meta_gap["mode"] == "close"
-    assert "mode_note" in meta_gap and "09:25-09:30" in meta_gap["mode_note"]
-
-    # 09:10 → pre_market
-    meta_am = json.loads((root / "2026-07-30" / "091000" / "meta.json").read_text(encoding="utf-8"))
+    # 2026-07-30 09:10 → pre_market（每日一份）
+    meta_am = json.loads((root / "2026-07-30" / "meta.json").read_text(encoding="utf-8"))
     assert meta_am["mode"] == "pre_market"
+    assert meta_am["time"] == "091000"
 
     # 导入源目录保持只读（未被修改）
     assert (fixture_output / "2026-07-31" / "复盘_103813.md").read_text(encoding="utf-8") == SAMPLE_MD
@@ -171,16 +172,18 @@ def test_import_basic_structure(imp, fixture_output, iso_dir, monkeypatch):
 def test_import_idempotent_and_force(imp, fixture_output, iso_dir, monkeypatch):
     root = iso_dir / "reviews"
     monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(root))
+    monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(iso_dir / "archive"))
 
     first = imp.run_import(fixture_output)
-    assert first["imported"] == 4
+    assert first["imported"] == 2
+    assert first["skipped"] == 2
     second = imp.run_import(fixture_output)
     assert second["imported"] == 0
     assert second["skipped"] == 4
-    assert len(list((root / "2026-07-31").iterdir())) == 3  # 未产生重复目录
+    assert {p.name for p in (root / "2026-07-31").iterdir()} == {"meta.json", "report.json", "snapshot.json"}
 
     # 目标 meta 去掉 imported_from_legacy → 视为非旧数据，跳过
-    entry = root / "2026-07-31" / "103813"
+    entry = root / "2026-07-31"
     meta = json.loads((entry / "meta.json").read_text(encoding="utf-8"))
     del meta["imported_from_legacy"]
     (entry / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
@@ -188,32 +191,40 @@ def test_import_idempotent_and_force(imp, fixture_output, iso_dir, monkeypatch):
     assert third["imported"] == 0
     assert third["skipped"] == 4
 
-    # --force 重导：覆盖写入且不产生 -2 目录
+    # --force 重导：覆盖写入（先归档旧版到 output/archive），不产生时间点子目录
     (entry / "report.json").unlink()
     fourth = imp.run_import(fixture_output, force=True)
-    assert fourth["imported"] == 4
+    assert fourth["imported"] == 2
+    assert fourth["skipped"] == 2
     assert (entry / "report.json").is_file()
-    assert not (root / "2026-07-31" / "103813-2").exists()
+    assert not (root / "2026-07-31" / "150500").exists()
     meta_after = json.loads((entry / "meta.json").read_text(encoding="utf-8"))
     assert meta_after["imported_from_legacy"] is True
+    # 归档：force 覆盖前旧版完整目录已复制到归档根（隔离目录）
+    archives = sorted((iso_dir / "archive").iterdir())
+    assert archives and any(a.name.startswith("2026-07-31_") for a in archives)
+    assert (next(a for a in archives if a.name.startswith("2026-07-31_")) / "meta.json").is_file()
 
 
 def test_import_dry_run_writes_nothing(imp, fixture_output, iso_dir, monkeypatch):
     root = iso_dir / "reviews"
     monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(root))
+    monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(iso_dir / "archive"))
     stats = imp.run_import(fixture_output, dry_run=True)
     assert stats["imported"] == 0
-    assert stats["dry_run"] == 4
+    assert stats["dry_run"] == 2  # 每日一份：每个日期预览一份
+    assert stats["skipped"] == 2  # 较早时间点跳过
     assert not root.exists()
 
 
 def test_import_date_filter(imp, fixture_output, iso_dir, monkeypatch):
     root = iso_dir / "reviews"
     monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(root))
+    monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(iso_dir / "archive"))
     stats = imp.run_import(fixture_output, date="2026-07-30")
     assert stats["scanned"] == 1
     assert stats["imported"] == 1
-    assert (root / "2026-07-30" / "091000").is_dir()
+    assert (root / "2026-07-30" / "meta.json").is_file()
     assert not (root / "2026-07-31").exists()
 
 

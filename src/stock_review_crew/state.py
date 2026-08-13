@@ -1,6 +1,6 @@
 """State Schema — LangGraph 共享状态定义"""
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated, Optional, TypedDict
 
 class ReviewState(TypedDict):
     # ── 输入（I4 上下文注入 + 后端入参）──
@@ -13,11 +13,13 @@ class ReviewState(TypedDict):
 
     # ── Node1 产出：行情数据 ──
     market_data: str                       # 渲染后的 Markdown 数据块（供分析师/报告）
+    market_weather: str                    # R12：市场天气/情绪温度简报（如「晴（79 分/偏暖）」）
     raw_news: str                          # 资讯原始 JSON 字符串（供资讯节点）
     snapshot: dict                         # 结构化数据快照（供 I4 落盘/前端图表/规则引擎）
 
     # ── Node2 产出：分析 ──
     analyses: Annotated[list[dict], operator.add]
+    analyst_accounts: Optional[dict]       # R12：{skill_id: 账户快照}（analysts_node 聚合；无数据为空 dict）
 
     # ── Node3 产出：主持人判断 ──
     discussion_topic: str

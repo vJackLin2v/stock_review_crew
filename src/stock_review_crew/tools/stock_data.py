@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 import time
 from datetime import date as date_type
@@ -84,7 +85,6 @@ MODE_LABELS = {
 
 INDEX_CODES = {
     "shanghai": "sh000001",
-    "shenzhen": "sz399001",
     "chuangye": "sz399006",
     "kechuang": "sh000688",
 }
@@ -540,6 +540,12 @@ def _legacy_cache_sectors(date: str) -> Optional[dict]:
 # ═══════════════════════════════════════════════════════════════
 
 def _records_from_tx(df: pd.DataFrame) -> list[dict]:
+    """akshare 通达信指数日线解析（2026-08-12 实测根因修正）：
+    stock_zh_index_daily_tx 返回列 date/open/close/high/low/amount——其中 amount
+    列**实为成交量（手）**（腾讯日K接口第 6 列是 volume，akshare 误命名 amount）。
+    因此映射：volume ← amount 列（成交量），amount 置 None → 由 _backfill_index_amount
+    用东财/通达信协议回填真实成交额（元）。此前把成交量当成交额直达报告，属错值。
+    """
     rows = []
     for _, r in df.iterrows():
         rows.append({
@@ -548,8 +554,8 @@ def _records_from_tx(df: pd.DataFrame) -> list[dict]:
             "high": _to_finite(r.get("high")),
             "low": _to_finite(r.get("low")),
             "close": _to_finite(r.get("close")),
-            "volume": _to_finite(r.get("volume")),
-            "amount": _to_finite(r.get("amount")),
+            "volume": _to_finite(r.get("amount")),
+            "amount": None,
         })
     return [r for r in rows if r["close"] is not None]
 
@@ -709,6 +715,7 @@ def _fetch_index_trend_impl(date: str, days: int = 60, tdx_path: Optional[str] =
             primary_ok = False
             errors.append(f"通达信akshare·{name}: {exc}")
     if primary_ok:
+        _backfill_index_amount(indices)
         note = None if asof == date else (f"非交易日，取最近交易日 {asof} 数据" if asof else None)
         out = {"indices": indices, "asof_date": asof, "requested_date": date,
                "source": "通达信akshare", "degraded": False, "degraded_reason": [], "note": note}
@@ -732,6 +739,12 @@ def _fetch_index_trend_impl(date: str, days: int = 60, tdx_path: Optional[str] =
                 src = "腾讯日K备用"
             except Exception as exc:
                 errors.append(f"腾讯日K备用·{name}: {exc}")
+        if records is None:
+            try:
+                records = _call_with_timeout(_records_from_tdx_remote, symbol)
+                src = "通达信协议"
+            except Exception as exc:
+                errors.append(f"通达信协议·{name}: {exc}")
         if records:
             metrics = _compute_index_metrics(records, date, days)
             if metrics is not None:
@@ -739,7 +752,8 @@ def _fetch_index_trend_impl(date: str, days: int = 60, tdx_path: Optional[str] =
                 indices[name] = metrics
                 if asof is None or metrics["daily"][-1]["date"] > asof:
                     asof = metrics["daily"][-1]["date"]
-    if all(v is not None for v in indices.values()):
+    if _index_required_ok(indices):
+        _backfill_index_amount(indices)
         note = None if asof == date else (f"非交易日，取最近交易日 {asof} 数据" if asof else None)
         return {"indices": indices, "asof_date": asof, "requested_date": date,
                 "source": "东财/腾讯日K备用", "degraded": True,
@@ -766,7 +780,8 @@ def _fetch_index_trend_impl(date: str, days: int = 60, tdx_path: Optional[str] =
         except Exception as exc:
             backup_ok = False
             errors.append(f"通达信本地·{name}: {exc}")
-    if backup_ok and all(v is not None for v in indices.values()):
+    if backup_ok and _index_required_ok(indices):
+        _backfill_index_amount(indices)
         note = None if asof == date else (f"非交易日，取最近交易日 {asof} 数据" if asof else None)
         return {"indices": indices, "asof_date": asof, "requested_date": date,
                 "source": "通达信本地", "degraded": True,
@@ -1059,13 +1074,13 @@ def _breadth_from_tushare(date: str) -> dict:
     is_gem = codes.str.startswith(("30", "68"))
     dist = {
         "涨停": len(sealed), "跌停": len(dieting),
-        "涨5-10%": int(((pct >= 0.05) & (pct < 0.0995) & ~is_gem).sum()
-                       + ((pct >= 0.10) & (pct < 0.1995) & is_gem).sum()),
-        "涨2-5%": int(((pct >= 0.02) & (pct < 0.05)).sum()),
-        "涨0-2%": int(((pct > 0) & (pct < 0.02)).sum()),
+        "涨5%-10%": int(((pct >= 0.05) & (pct < 0.0995) & ~is_gem).sum()
+                        + ((pct >= 0.10) & (pct < 0.1995) & is_gem).sum()),
+        "涨2%-5%": int(((pct >= 0.02) & (pct < 0.05)).sum()),
+        "涨0%-2%": int(((pct > 0) & (pct < 0.02)).sum()),
         "平盘": flat,
-        "跌0-2%": int(((pct < 0) & (pct > -0.02)).sum()),
-        "跌2-5%": int(((pct <= -0.02) & (pct > -0.05)).sum()),
+        "跌0%-2%": int(((pct < 0) & (pct > -0.02)).sum()),
+        "跌2%-5%": int(((pct <= -0.02) & (pct > -0.05)).sum()),
         "跌5%以上": int((pct <= -0.05).sum()),
     }
     return {
@@ -1263,7 +1278,7 @@ def _sectors_from_hist(date: str) -> dict:
     deadline = time.monotonic() + _SECTOR_HISTORY_BUDGET
     errors: list[str] = []
     for source, names_fn, hist_fn in (
-        ("同花顺", _ths_sector_names, _ths_sector_hist),
+        ("同花顺", _ths_sector_names_line, _ths_sector_hist_line),
         ("东财", _em_sector_names, _em_sector_hist),
     ):
         try:
@@ -2430,11 +2445,11 @@ def _mode_result(date: str, mode: str, blocks: dict) -> dict:
 def fetch_pre_market(date: str, tdx_path: Optional[str] = None) -> dict:
     """早盘前决策：隔夜外盘 + 昨夜消息 + 指数日线均线。"""
     _d(date)
-    return _mode_result(date, "pre_market", {
-        "index_trend": fetch_index_trend(date, days=60, tdx_path=tdx_path),
-        "macro": fetch_market_macro(date),
-        "news": fetch_news_headlines(date),
-    })
+    return _mode_result(date, "pre_market", _parallel_blocks({
+        "index_trend": lambda: fetch_index_trend(date, days=60, tdx_path=tdx_path),
+        "macro": lambda: fetch_market_macro(date),
+        "news": lambda: fetch_news_headlines(date),
+    }))
 
 
 def fetch_auction(date: str, tdx_path: Optional[str] = None) -> dict:
@@ -2446,59 +2461,59 @@ def fetch_auction(date: str, tdx_path: Optional[str] = None) -> dict:
 def fetch_intraday_am(date: str, tdx_path: Optional[str] = None) -> dict:
     """上午盘中：上午分时（截至当前）+ 板块 + 涨停/炸板 + 情绪。"""
     _d(date)
-    return _mode_result(date, "intraday_am", {
-        "index_trend": fetch_index_trend(date, tdx_path=tdx_path),
-        "minute": fetch_minute_data("sh000001", date, period=1,
-                                    end_time=_mode_end_time("intraday_am"), tdx_path=tdx_path),
-        "sectors": fetch_sectors(date),
-        "zt_pool": fetch_zt_pool(date),
-        "breadth": fetch_market_breadth(date),
-        "sentiment": fetch_sentiment(date, tdx_path=tdx_path),
-    })
+    return _mode_result(date, "intraday_am", _parallel_blocks({
+        "index_trend": lambda: fetch_index_trend(date, tdx_path=tdx_path),
+        "minute": lambda: fetch_minute_data("sh000001", date, period=1,
+                                            end_time=_mode_end_time("intraday_am"), tdx_path=tdx_path),
+        "sectors": lambda: fetch_sectors(date),
+        "zt_pool": lambda: fetch_zt_pool(date),
+        "breadth": lambda: fetch_market_breadth(date),
+        "sentiment": lambda: fetch_sentiment(date, tdx_path=tdx_path),
+    }))
 
 
 def fetch_noon(date: str, tdx_path: Optional[str] = None) -> dict:
     """午间复盘：上午分时全量 + 板块 + 涨停/炸板 + 情绪。"""
     _d(date)
-    return _mode_result(date, "noon", {
-        "index_trend": fetch_index_trend(date, tdx_path=tdx_path),
-        "minute": fetch_minute_data("sh000001", date, period=1, end_time="11:30",
-                                    tdx_path=tdx_path),
-        "sectors": fetch_sectors(date),
-        "zt_pool": fetch_zt_pool(date),
-        "breadth": fetch_market_breadth(date),
-        "sentiment": fetch_sentiment(date, tdx_path=tdx_path),
-    })
+    return _mode_result(date, "noon", _parallel_blocks({
+        "index_trend": lambda: fetch_index_trend(date, tdx_path=tdx_path),
+        "minute": lambda: fetch_minute_data("sh000001", date, period=1, end_time="11:30",
+                                            tdx_path=tdx_path),
+        "sectors": lambda: fetch_sectors(date),
+        "zt_pool": lambda: fetch_zt_pool(date),
+        "breadth": lambda: fetch_market_breadth(date),
+        "sentiment": lambda: fetch_sentiment(date, tdx_path=tdx_path),
+    }))
 
 
 def fetch_intraday_pm(date: str, tdx_path: Optional[str] = None) -> dict:
     """下午盘中：全天分时（截至当前）+ 板块资金 + 涨停梯队/炸板 + 情绪。"""
     _d(date)
-    return _mode_result(date, "intraday_pm", {
-        "index_trend": fetch_index_trend(date, tdx_path=tdx_path),
-        "minute": fetch_minute_data("sh000001", date, period=1,
-                                    end_time=_mode_end_time("intraday_pm"), tdx_path=tdx_path),
-        "sectors": fetch_sectors(date),
-        "zt_pool": fetch_zt_pool(date),
-        "breadth": fetch_market_breadth(date),
-        "sentiment": fetch_sentiment(date, tdx_path=tdx_path),
-    })
+    return _mode_result(date, "intraday_pm", _parallel_blocks({
+        "index_trend": lambda: fetch_index_trend(date, tdx_path=tdx_path),
+        "minute": lambda: fetch_minute_data("sh000001", date, period=1,
+                                            end_time=_mode_end_time("intraday_pm"), tdx_path=tdx_path),
+        "sectors": lambda: fetch_sectors(date),
+        "zt_pool": lambda: fetch_zt_pool(date),
+        "breadth": lambda: fetch_market_breadth(date),
+        "sentiment": lambda: fetch_sentiment(date, tdx_path=tdx_path),
+    }))
 
 
 def fetch_close(date: str, tdx_path: Optional[str] = None) -> dict:
     """收盘复盘（默认）：全天行情：指数/涨跌停/板块/情绪/资金/龙虎榜/资讯。"""
     _d(date)
-    return _mode_result(date, "close", {
-        "index_trend": fetch_index_trend(date, days=60, tdx_path=tdx_path),
-        "minute": fetch_minute_data("sh000001", date, period=1, end_time="15:00",
-                                    tdx_path=tdx_path),
-        "zt_pool": fetch_zt_pool(date),
-        "sectors": fetch_sectors(date),
-        "breadth": fetch_market_breadth(date),
-        "sentiment": fetch_sentiment(date, tdx_path=tdx_path),
-        "lhb": fetch_lhb(date),
-        "news": fetch_news_headlines(date),
-    })
+    return _mode_result(date, "close", _parallel_blocks({
+        "index_trend": lambda: fetch_index_trend(date, days=60, tdx_path=tdx_path),
+        "minute": lambda: fetch_minute_data("sh000001", date, period=1, end_time="15:00",
+                                            tdx_path=tdx_path),
+        "zt_pool": lambda: fetch_zt_pool(date),
+        "sectors": lambda: fetch_sectors(date),
+        "breadth": lambda: fetch_market_breadth(date),
+        "sentiment": lambda: fetch_sentiment(date, tdx_path=tdx_path),
+        "lhb": lambda: fetch_lhb(date),
+        "news": lambda: fetch_news_headlines(date),
+    }))
 
 
 _MODE_NODES = {
@@ -2670,4 +2685,399 @@ def fetch_market_micro(date: str, tdx_path: Optional[str] = None) -> dict:
         "degraded": degraded,
         "sources": {"index": trend["source"], "zhangting": zt["source"],
                     "breadth": breadth["source"], "sectors": sectors["source"]},
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# 2026-08-13 恢复：以下为最近几天的未提交改动（子代理拆分 stock_data.py 失败后，
+# 从 __pycache__ 的 3.13 字节码逐条还原）。变量与函数均为原样重建，逻辑不变。
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+REQUIRED_INDEXES = {"shanghai", "chuangye", "kechuang"}
+_THS_LINE_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+_THS_NAMES_TTL = 3600.0
+_ths_code_map: dict[str, str] = {}
+_ths_names_cached_at: Optional[float] = None
+_ts_name_cache: dict = {}
+
+
+def _index_required_ok(indices: dict) -> bool:
+    """必需指数（上证/创业板/科创50）是否齐备；深证成指缺失不影响复盘。"""
+    return all(indices.get(k) is not None for k in REQUIRED_INDEXES)
+
+
+def _get(url: str, **kw: Any):
+    """requests.get 封装：代理客户端未启动/挂掉（ProxyError）时自动直连重试。
+
+    国内行情源直连可用（2026-08-04 实测）；代理恢复前不阻断取数。
+    """
+    import requests
+
+    try:
+        return requests.get(url, **kw)
+    except requests.exceptions.ProxyError:
+        return requests.get(url, proxies={"http": None, "https": None}, **kw)
+
+
+def _records_from_tdx_remote(symbol: str) -> list[dict]:
+    """通达信协议远程备用：指数日K直连主站（解决本地 F:\\tdx 陈旧与 akshare 失败）。"""
+    from .tdx_remote import TdxRemoteError, fetch_daily
+
+    try:
+        code = symbol[2:]
+        if symbol.startswith("sh"):
+            market = 1
+        elif symbol.startswith("bj"):
+            market = 2
+        else:
+            market = 0
+        return fetch_daily(code, count=400, is_index=True, market=market)
+    except TdxRemoteError as exc:
+        raise DataSourceError(f"通达信协议: {exc}") from exc
+
+
+def _backfill_index_amount(indices: dict) -> None:
+    """M3：指数成交额回填——主源/备用源成功后 amount 为 None 时，用东财 push2his
+    → 通达信协议回填当日成交额（只写 daily[-1]["amount"] 与 metrics["amount"]）；
+    全失败时静默保持 None，不抛异常（回填失败不影响主流程，且只写 amount 字段）。"""
+    for name, symbol in INDEX_CODES.items():
+        metrics = indices.get(name)
+        if not isinstance(metrics, dict):
+            continue
+        if metrics.get("amount") is not None:
+            continue
+        daily = metrics.get("daily") or []
+        if not daily:
+            continue
+        target_date = daily[-1].get("date")
+        if not target_date:
+            continue
+        filled = None
+        for src_fn in (_records_from_em_kline, _records_from_tdx_remote):
+            try:
+                records = _call_with_timeout(src_fn, symbol)
+                if not records:
+                    continue
+                for r in reversed(records):
+                    if r.get("date") != target_date:
+                        continue
+                    if r.get("amount") is None:
+                        continue
+                    filled = r["amount"]
+                    break
+                if filled is not None:
+                    break
+            except Exception:
+                continue
+        if filled is not None:
+            daily[-1]["amount"] = filled
+            metrics["amount"] = filled
+
+
+def _ths_sector_names_line() -> pd.DataFrame:
+    """同花顺行业板块列表（直连 q.10jqka.com.cn/thshy/ 页面解析，无需 JS 签名）。"""
+    if _ths_code_map and _ths_names_cached_at and (
+        time.monotonic() - _ths_names_cached_at < _THS_NAMES_TTL
+    ):
+        return pd.DataFrame(
+            [{"name": n, "code": c} for n, c in _ths_code_map.items()],
+            columns=["name", "code"],
+        )
+    resp = _get("https://q.10jqka.com.cn/thshy/", headers={"User-Agent": _THS_LINE_UA}, timeout=15)
+    resp.raise_for_status()
+    html = resp.text
+    pairs = re.findall(r'/thshy/detail/code/(\d{6})/"[^>]*>([^<]+)</a>', html)
+    rows = []
+    for code, name in pairs:
+        name = str(name).strip()
+        if not name:
+            continue
+        if name in _ths_code_map:
+            continue
+        _ths_code_map[name] = code
+        rows.append({"name": name, "code": code})
+    if not rows:
+        raise DataSourceError("同花顺行业板块列表解析为空（页面结构可能变更）")
+    _ths_names_cached_at = time.monotonic()
+    return pd.DataFrame(rows, columns=["name", "code"])
+
+
+def _ths_sector_hist_line(name: str, start: str, end: str) -> pd.DataFrame:
+    """同花顺行业板块历史日K（直连 d.10jqka.com.cn，无需 py_mini_racer）。
+
+    优先 v4 按年文件（akshare 同款路径），失败时降级 v6 last（最近约 140 根）。
+    返回 DataFrame：日期/开盘价/最高价/最低价/收盘价/成交量/成交额（YYYYMMDD 升序）。
+    """
+    code = _ths_code_map.get(name)
+    if not code:
+        _ths_sector_names_line()
+        code = _ths_code_map.get(name)
+    if not code:
+        raise DataSourceError(f"同花顺板块映射缺失：{name}")
+    year = str(start)[:4]
+    urls = [
+        f"https://d.10jqka.com.cn/v4/line/bk_{code}/01/{year}.js",
+        f"http://d.10jqka.com.cn/v6/line/bk_{code}/01/last.js",
+    ]
+    last_exc = None
+    for url in urls:
+        try:
+            resp = _get(
+                url,
+                headers={"User-Agent": _THS_LINE_UA, "Referer": "http://q.10jqka.com.cn"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            m = re.search(r"\((.*)\)\s*$", resp.text, re.S)
+            if not m:
+                raise DataSourceError("响应非 JSONP 结构")
+            payload = json.loads(m.group(1))
+            data = payload.get("data") or ""
+            rows = []
+            for line in data.split(";"):
+                parts = str(line).split(",")
+                if len(parts) < 7 or not parts[0]:
+                    continue
+                d = parts[0]
+                if d < start or d > end:
+                    continue
+                close = _to_finite(parts[4])
+                if close is None:
+                    continue
+                rows.append({
+                    "日期": d,
+                    "开盘价": _to_finite(parts[1]),
+                    "最高价": _to_finite(parts[2]),
+                    "最低价": _to_finite(parts[3]),
+                    "收盘价": close,
+                    "成交量": _to_finite(parts[5]),
+                    "成交额": _to_finite(parts[6]),
+                })
+            if rows:
+                rows.sort(key=lambda r: r["日期"])
+                return pd.DataFrame(rows)
+            raise DataSourceError(f"范围内（{start}~{end}）无日线记录")
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise AssertionError("unreachable")
+
+
+def _minute_bars_from_tdx_remote(symbol: str, date: str, period: int, end_time: Optional[str]) -> list[dict]:
+    """通达信协议远程备用：分钟K线直连主站（约 6 个交易日历史，补腾讯仅当日的缺口）。"""
+    from .tdx_remote import TdxRemoteError, fetch_minute_kline
+
+    try:
+        code = str(symbol).lower()
+        if code.startswith(("sh", "sz", "bj")):
+            code = code[2:]
+        category = 8 if period == 1 else 0
+        bars = fetch_minute_kline(code, count=800, category=category)
+        day = str(date)
+        end_hm = str(end_time or "15:00")[:5]
+        rows = []
+        for b in bars:
+            dt = str(b.get("datetime") or "")
+            if len(dt) < 16:
+                continue
+            if dt[:10] != day:
+                continue
+            tm = dt[11:16]
+            if tm > end_hm:
+                continue
+            rows.append({
+                "time": tm[:5],
+                "open": b.get("open"),
+                "high": b.get("high"),
+                "low": b.get("low"),
+                "close": b.get("close"),
+                "volume": b.get("volume"),
+                "amount": b.get("amount"),
+            })
+        if not rows:
+            raise DataSourceError(f"通达信协议 {date} 无 {period} 分钟记录")
+        return rows
+    except TdxRemoteError as exc:
+        raise DataSourceError(f"通达信协议: {exc}") from exc
+
+
+def _stock_info_from_tdx_remote(code: str, date: str) -> dict:
+    """通达信协议远程备用：日K直连主站（解决本地 F:\\tdx 数据陈旧问题）。"""
+    from .tdx_remote import TdxRemoteError, fetch_daily
+
+    try:
+        bars = fetch_daily(code, count=400)
+        recs = [b for b in bars if b.get("date") and b["date"] <= date]
+        if not recs:
+            raise DataSourceError(f"通达信协议截至 {date} 无 {code} 日线")
+        closes = [r["close"] for r in recs if r.get("close") is not None]
+        latest = recs[-1]
+        ma5 = round(sum(closes[-5:]) / 5, 4) if len(closes) >= 5 else None
+        ma10 = round(sum(closes[-10:]) / 10, 4) if len(closes) >= 10 else None
+        prev = recs[-2]["close"] if len(recs) >= 2 else None
+        pct_change = round((latest["close"] - prev) / prev, 6) if (prev and latest["close"] is not None) else None
+        recent5 = [{"date": r["date"], "close": r["close"], "pct_change": None} for r in recs[-5:]]
+        return {
+            "code": code,
+            "name": None,
+            "date": latest["date"],
+            "open": latest["open"],
+            "high": latest["high"],
+            "low": latest["low"],
+            "close": latest["close"],
+            "pre_close": prev,
+            "volume": latest["volume"],
+            "amount": latest["amount"],
+            "pct_change": pct_change,
+            "ma5": ma5,
+            "ma10": ma10,
+            "recent5": recent5,
+            "source": "通达信协议",
+            "degraded": True,
+            "degraded_reason": ["Tushare/东财均不可用，降级通达信协议主站"],
+            "note": None,
+        }
+    except TdxRemoteError as exc:
+        raise DataSourceError(f"通达信协议: {exc}") from exc
+
+
+def _parallel_blocks(block_fns: dict, timeout: float = 45.0) -> dict:
+    """并行执行各数据块取数（线程池），显著缩短串行降级链的总耗时。
+    每块独立 try/except，失败/超时不影响其它块。"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from ..config import news_enabled
+
+    try:
+        if not news_enabled():
+            block_fns = {k: v for k, v in block_fns.items() if k != "news"}
+    except Exception:
+        pass
+
+    results: dict = {}
+
+    def _run(name, fn):
+        try:
+            return name, fn()
+        except BaseException as exc:
+            return name, {"source": "数据缺失", "degraded": True,
+                          "degraded_reason": [f"{name}: {exc}"]}
+
+    with ThreadPoolExecutor(max_workers=min(8, len(block_fns))) as pool:
+        futures = {pool.submit(_run, n, f): n for n, f in block_fns.items()}
+        try:
+            for fut in as_completed(futures, timeout=timeout):
+                name, val = fut.result()
+                results[name] = val
+        except TimeoutError:
+            pass
+
+    for name in block_fns:
+        if name not in results:
+            results[name] = {"source": "数据缺失", "degraded": True,
+                             "degraded_reason": [f"{name}: 取数超时（> {timeout}s）"]}
+    return results
+
+
+def fetch_stock_detail(code: str, date: Optional[str] = None, days: int = 60) -> dict:
+    """R9 个股详情聚合：实时快照/日K/分时/5分钟K/1分钟K/均线，各块独立降级。
+    数据源链：实时=东财→腾讯→通达信协议；日K=通达信协议→腾讯日K；
+    分时=东财→腾讯→通达信协议→本地；分钟K=通达信协议（约 6 个交易日）。
+    """
+    code = str(code).zfill(6)
+    date = date or _now().strftime("%Y-%m-%d")
+    _d(date)
+    if not code.isdigit() or len(code) != 6:
+        raise DataSourceError("股票代码应为 6 位数字")
+    if days < 5 or days > 250:
+        raise DataSourceError("days 应在 5-250 之间")
+    degraded: list[str] = []
+    sources: dict[str, str] = {}
+
+    quote = None
+    try:
+        from .realtime import fetch_stock_quote
+
+        q = fetch_stock_quote(code)
+        quote = {k: q.get(k) for k in (
+            "code", "name", "price", "pct_change", "open", "high", "low",
+            "pre_close", "volume", "amount", "turnover_rate", "bids", "asks",
+        )}
+        sources["quote"] = str(q.get("source") or "实时")
+    except Exception as exc:
+        degraded.append(f"实时快照: {exc}")
+
+    daily: list[dict] = []
+    ma: dict[str, Optional[float]] = {}
+    try:
+        from .tdx_remote import fetch_daily
+
+        bars = fetch_daily(code, count=max(400, days + 10))
+        recs = [b for b in bars if b.get("date") and b["date"] <= date]
+        daily = [{"date": b["date"], "open": b["open"], "high": b["high"],
+                  "low": b["low"], "close": b["close"],
+                  "volume": b["volume"], "amount": b["amount"]} for b in recs]
+        closes = [b["close"] for b in recs if b.get("close") is not None]
+        for p in (5, 10, 20):
+            ma[f"ma{p}"] = round(sum(closes[-p:]) / p, 4) if len(closes) >= p else None
+        sources["daily"] = "通达信协议"
+    except Exception as exc:
+        degraded.append(f"日K: {exc}")
+        try:
+            symbol = ("sh" if code.startswith(("6", "9")) else
+                      "bj" if code.startswith(("4", "8")) else "sz")
+            recs = _records_from_tx_kline(symbol)[-days:]
+            daily = [{"date": b["date"], "open": b["open"], "high": b["high"],
+                      "low": b["low"], "close": b["close"],
+                      "volume": b["volume"], "amount": b["amount"]} for b in recs]
+            closes = [b["close"] for b in recs if b.get("close") is not None]
+            for p in (5, 10, 20):
+                ma[f"ma{p}"] = round(sum(closes[-p:]) / p, 4) if len(closes) >= p else None
+            sources["daily"] = "腾讯日K"
+        except Exception as exc2:
+            degraded.append(f"日K备用: {exc2}")
+
+    minute: list[dict] = []
+    try:
+        blk = fetch_minute_data(code, date, 1)
+        minute = blk.get("bars") or []
+        sources["minute"] = str(blk.get("source") or "分时")
+    except Exception as exc:
+        degraded.append(f"分时: {exc}")
+
+    kline_5m: list[dict] = []
+    kline_1m: list[dict] = []
+    try:
+        from .tdx_remote import fetch_minute_kline
+
+        kline_5m = [b for b in fetch_minute_kline(code, 800, category=0)
+                    if b.get("date") and b["date"] <= date][-days:]
+        sources["kline_5m"] = "通达信协议"
+    except Exception as exc:
+        degraded.append(f"5分钟K: {exc}")
+    try:
+        from .tdx_remote import fetch_minute_kline as _fmk
+
+        kline_1m = [b for b in _fmk(code, 800, category=8)
+                    if b.get("date") and b["date"] <= date][-days:]
+        sources["kline_1m"] = "通达信协议"
+    except Exception as exc:
+        degraded.append(f"1分钟K: {exc}")
+
+    return {
+        "code": code,
+        "date": date,
+        "quote": quote,
+        "daily": daily,
+        "minute": minute,
+        "kline_5m": kline_5m,
+        "kline_1m": kline_1m,
+        "ma": ma,
+        "sources": sources,
+        "degraded": list(dict.fromkeys(degraded)),
+        "updated_at": _now().strftime("%Y-%m-%d %H:%M:%S"),
     }

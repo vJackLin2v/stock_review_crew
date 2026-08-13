@@ -33,6 +33,7 @@ def test_six_modes_defined():
         assert info["label"]
         assert info["desc"]
         assert len(info["sections"]) >= 6
+        assert len(info["analyst_titles"]) == 3
         assert any("核心观点" in s for s in info["sections"])
         assert any("分歧" in s for s in info["sections"])
         assert any("风险" in s for s in info["sections"])
@@ -42,15 +43,31 @@ def test_analyst_prompt_injection():
     p = prompts.build_analyst_prompt(_state(
         yesterday_report="昨日：预判看多",
         earlier_today="午间：维持看多",
+        market_weather="晴（79 分/偏暖）",
     ))
     assert "2026-08-03" in p
     assert "收盘复盘" in p
     assert "指数快照内容" in p
     assert "昨日：预判看多" in p
     assert "午间：维持看多" in p
-    assert "## 1、昨日复盘验证" in p
-    assert "## 2、今日判断" in p
-    assert "## 3、操作计划" in p
+    # R11-4：固定三段格式 + 昨日验证内嵌「大盘判断」首行
+    assert "## 1、大盘判断" in p
+    assert "## 2、明日策略" in p
+    assert "## 3、明日个股推荐" in p
+    # P0-1：本模式分析要点注入（focus/judgment/plan 不再是死代码）
+    assert "## 本模式分析要点" in p
+    assert "本模式聚焦：今日大盘判断" in p
+    assert "明日计划要点" in p
+    assert "昨日验证：" in p
+    # R12：市场天气/情绪温度纳入分析师 prompt
+    assert "晴（79 分/偏暖）" in p
+    assert "市场天气/情绪温度" in p
+
+
+def test_analyst_prompt_weather_missing():
+    """市场天气缺失时 prompt 标注「无数据」而非留空。"""
+    p = prompts.build_analyst_prompt(_state())
+    assert "市场天气/情绪温度（复盘指标，R12）：无数据" in p
 
 
 def test_yesterday_missing_skip_rule():
@@ -65,7 +82,23 @@ def test_all_modes_analyst_prompt():
         p = prompts.build_analyst_prompt(_state(mode=mode))
         assert prompts.MODE_INFO[mode]["label"] in p
         assert "无昨日报告，跳过验证" in p
+        # P0-1：本模式分析要点注入 + 三段章节标题按模式生成
+        assert "## 本模式分析要点" in p
         assert prompts.MODE_INFO[mode]["focus_zh"] in p
+        assert prompts.MODE_INFO[mode]["judgment"] in p
+        assert prompts.MODE_INFO[mode]["plan_zh"] in p
+        t1, t2, t3 = prompts.MODE_INFO[mode]["analyst_titles"]
+        assert f"## 1、{t1}" in p
+        assert f"## 2、{t2}" in p
+        assert f"## 3、{t3}" in p
+
+
+def test_pre_market_no_tomorrow_stock_rec():
+    """P0-1 验收：pre_market 不再写「明日个股推荐」，标题随模式变化。"""
+    p = prompts.build_analyst_prompt(_state(mode="pre_market"))
+    assert "明日个股推荐" not in p
+    assert "## 3、今日关注标的" in p
+    assert "## 1、今日大盘预判" in p
 
 
 def test_sentiment_gets_trend_context():
@@ -120,6 +153,68 @@ def test_report_prompt_all_modes_sections():
         p = prompts.build_report_prompt(_state(mode=mode))
         for s in prompts.MODE_INFO[mode]["sections"]:
             assert f"## {s}" in p
+
+
+def test_report_prompt_yesterday_context_injected():
+    """P1-G：昨日/更早复盘注入报告 prompt（各截断 3000 字，缺失写「（无）」）。"""
+    p = prompts.build_report_prompt(_state())
+    assert "## 昨日/更早复盘（对照验证，P1-G）" in p
+    assert "昨日收盘复盘：\n（无）" in p
+    assert "当日更早复盘：\n（无）" in p
+    assert "无昨日复盘，跳过验证" in p
+
+    long_yesterday = "昨日" * 4000  # 8000 字，应截断到 3000
+    p2 = prompts.build_report_prompt(_state(yesterday_report=long_yesterday))
+    assert "昨日" * 1500 in p2  # 3000 字
+    assert ("昨日" * 1500 + "昨日") not in p2
+
+
+def test_report_prompt_length_and_dedup_constraints():
+    """P1-B：总字数/章节长度上限、禁复制原文、禁套话。"""
+    p = prompts.build_report_prompt(_state())
+    assert "总字数 ≤1500 字" in p
+    assert "每个章节 ≤300 字" in p
+    assert "禁止整段复制分析师原文" in p
+    assert "免责声明由系统在报告末尾统一追加" in p
+
+
+def test_report_prompt_unit_layers_no_conflict():
+    """P1-A：单位指令分层（表格原样引用 / 正文亿元），旧自相矛盾措辞已删除。"""
+    p = prompts.build_report_prompt(_state())
+    assert "表格列（成交量/成交额）" in p
+    assert "原样引用数据快照中的数字" in p
+    assert "一律用「亿元」展示" in p
+    assert "547852512 元 → 5.48 亿元" in p
+    assert "5479 万元 → 0.55 亿元" not in p
+
+
+def test_report_prompt_r6_expression_constraints():
+    """R6（2026-08-08）：表述铁律注入——禁止比喻/夸张/口语化修辞，用数据+百分点对照。"""
+    p = prompts.build_report_prompt(_state())
+    assert "## 表述铁律（R6" in p
+    assert "近乎腰斩" in p
+    assert "断崖" in p
+    assert "崩了" in p
+    assert "禁止比喻、夸张与口语化修辞" in p
+    assert "23.35 个百分点" in p  # 数据 + 百分点对照示例
+    assert "章节结构与 Markdown 格式与本 prompt 约定完全一致" in p  # R7 格式不变
+
+
+def test_quality_detect_sensitive_phrases():
+    """R6 P2（2026-08-08）：quality 敏感表述检测——比喻/夸张/口语化修辞命中，正常措辞不误报。"""
+    from stock_review_crew import quality
+
+    r = quality.detect_sensitive_phrases("股价近乎腰斩，随后断崖式下跌，崩了")
+    assert r["total"] == 5  # 近乎腰斩/腰斩/断崖/断崖式/崩了（词表允许重叠，检出即命中）
+    phrases = {h["phrase"] for h in r["hits"]}
+    assert {"近乎腰斩", "腰斩", "断崖", "断崖式", "崩了"} <= phrases
+
+    # 正常数据 + 百分点对照表达不误报
+    ok = quality.detect_sensitive_phrases(
+        "昨日涨停红盘率 53.57%，较前日 76.92% 下降 23.35 个百分点"
+    )
+    assert ok["total"] == 0
+    assert quality.detect_sensitive_phrases(None) == {"hits": [], "total": 0}
 
 
 def test_report_title():

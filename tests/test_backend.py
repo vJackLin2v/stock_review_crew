@@ -11,11 +11,11 @@
 """
 
 import os
-
 import re
 import shutil
 import sys
 import time
+import types
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +33,40 @@ from stock_review_crew.storage.reviews import save_review
 import backend.main as bm
 
 client = TestClient(bm.app)
+
+
+_MOCK_REPORT = (
+    "# 2026-08-03 A股收盘复盘报告\n\n"
+    "## 一、市场概况\n指数收涨，量能温和。\n\n"
+    "## 二、盘面特征\n涨停 47 家、跌停 3 家，连板高度 3 板。\n\n"
+    "## 三、操作计划\n轻仓观察，等待方向。\n\n"
+    "> 仅供参考，不构成投资建议"
+)
+
+
+class _FakeLLM:
+    def __init__(self, factory):
+        self._factory = factory
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages, config=None):
+        return types.SimpleNamespace(content=self._factory(messages))
+
+
+def _llm_reply(messages):
+    """按消息内容确定性返回 mock 回复（2026-08-10 契约：LLM 不可用时复盘直接终止，
+    因此测全链路的用例必须让 LLM 可用）。"""
+    user = ""
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "user":
+            user = m.get("content", "")
+    if "报告要求" in user:
+        return _MOCK_REPORT
+    if "实质性分歧" in user:
+        return "分歧判断：无\n总结：观点一致，无需辩论。"
+    return "## 1、昨日复盘验证\n无昨日报告，跳过验证\n## 2、今日判断\n看多\n## 3、操作计划\n进攻"
 
 
 @pytest.fixture(autouse=True)
@@ -75,6 +109,10 @@ def _fake_mode_data(mode: str, date: str) -> dict:
                     {"板块": "半导体", "涨跌幅": 0.02, "领涨股": "示例科技"},
                     {"板块": "军工", "涨跌幅": 0.015, "领涨股": "示例军工"},
                 ],
+                "bottom5": [
+                    {"板块": "保险", "涨跌幅": -0.03, "领涨股": "示例保险"},
+                    {"板块": "煤炭", "涨跌幅": -0.02, "领涨股": "示例煤炭"},
+                ],
                 "source": "测试源·板块",
                 "degraded": False,
             },
@@ -85,7 +123,15 @@ def _fake_mode_data(mode: str, date: str) -> dict:
                 "source": "测试源·涨跌停",
                 "degraded": False,
             },
-            "breadth": {"up": 2800, "down": 1800, "limit_up": 45, "limit_down": 3, "zhaban_rate_pct": 12.0},
+            "breadth": {
+                "up": 2800, "down": 1800, "limit_up": 45, "limit_down": 3, "zhaban_rate_pct": 12.0,
+                "distribution": {
+                    "涨停": 45, "跌停": 3, "涨5%-10%": 90, "涨2%-5%": 380, "涨0%-2%": 1500,
+                    "平盘": 120, "跌0%-2%": 1300, "跌2%-5%": 220, "跌5%以上": 30,
+                },
+                "source": "测试源·涨跌分布",
+                "note": "测试分布说明（降级时透传）",
+            },
             "sentiment": {
                 "up_count": 2800,
                 "down_count": 1800,
@@ -117,18 +163,24 @@ def iso_dirs(monkeypatch):
     base = Path(__file__).resolve().parent.parent / ".tmp" / f"backend_test_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     reviews_dir = base / "reviews"
     chats_dir = base / "chats"
+    archive_dir = base / "archive"
     reviews_dir.mkdir(parents=True, exist_ok=True)
     chats_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(reviews_dir))
     monkeypatch.setenv("CHATS_DATA_DIR", str(chats_dir))
-    yield {"base": base, "reviews": reviews_dir, "chats": chats_dir}
+    monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(archive_dir))
+    yield {"base": base, "reviews": reviews_dir, "chats": chats_dir, "archive": archive_dir}
     shutil.rmtree(base, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
-    """离线确定性：规则引擎降级 + 聊天无 LLM + 数据取数/检索全 mock，禁止真实网络。"""
-    monkeypatch.setattr(graph, "_llm_ready", lambda: False)
+    """离线确定性：LLM 用确定性 mock（2026-08-10 契约：LLM 不可用时复盘直接终止，
+    因此测全链路的用例必须让 LLM 可用）+ 数据取数/检索全 mock，禁止真实网络。"""
+    monkeypatch.setattr(graph, "_llm_ready", lambda: True)
+    llm = _FakeLLM(_llm_reply)
+    strict = _FakeLLM(_llm_reply)
+    monkeypatch.setattr(graph, "_llm_pair", lambda: (llm, strict))
     monkeypatch.setattr(graph, "_callbacks", lambda: [])
     monkeypatch.setattr(graph, "_load_analyst_tools", lambda: (None, None))
     monkeypatch.setattr(graph, "_legacy_fetch", lambda state: None)  # 兜底：禁止旧工具网络路径
@@ -171,7 +223,14 @@ def _wait_job(job_id: str, timeout: float = 30.0) -> dict:
 def test_health():
     r = client.get("/api/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    data = r.json()
+    assert data["status"] == "ok"
+    # 2026-08-06：health 附带 Langfuse 监控状态（每次启动打开监控的可见性契约）
+    assert isinstance(data.get("langfuse"), dict)
+    for key in ("enabled", "callback_ok", "host", "mode"):
+        assert key in data["langfuse"]
+    # 2026-08-12：health 附带资讯开关（前端进度条据此隐藏「资讯」步骤）
+    assert isinstance(data.get("news_enabled"), bool)
 
 
 def test_static_mount():
@@ -186,7 +245,7 @@ def test_static_mount():
 
 def test_review_full_chain(fake_fetch, iso_dirs):
     # 详情 404 中文（记录不存在）
-    r = client.get("/api/reviews/2020-01-02/000000")
+    r = client.get("/api/reviews/2020-01-02")
     assert r.status_code == 404
     assert "复盘记录不存在" in r.json()["detail"]
 
@@ -209,9 +268,12 @@ def test_review_full_chain(fake_fetch, iso_dirs):
 
     res = job["result"]
     record_id = res["record_id"]
-    assert re.fullmatch(r"2020-01-02_\d{6}(?:-\d+)?", record_id), record_id
-    # result 契约：{record_id, meta, report, snapshot}
-    assert set(res) == {"record_id", "meta", "report", "snapshot"}
+    # R11 R4：record_id = "{date}"（每日一份，不再含 HHMMSS）
+    assert record_id == "2020-01-02"
+    # result 契约：{record_id, meta, report, snapshot, quality?}（quality 为 R10 Q4 可空字段）
+    assert set(res) >= {"record_id", "meta", "report", "snapshot"}
+    assert "quality" in res
+    assert res["quality"] is None or isinstance(res["quality"], dict)
     meta = res["meta"]
     for key in ("date", "mode", "mode_label", "time", "created_at", "degraded", "sources", "disclaimer", "summary"):
         assert key in meta, f"meta 缺少契约键：{key}"
@@ -222,13 +284,25 @@ def test_review_full_chain(fake_fetch, iso_dirs):
     assert isinstance(meta["degraded"], list) and meta["degraded"]
     assert isinstance(meta["sources"], list) and meta["sources"]
     assert isinstance(meta["summary"], str) and meta["summary"]
-    assert meta["time"] == record_id.split("_", 1)[1]
+    assert re.fullmatch(r"\d{6}", str(meta["time"]))  # 时间点仅作展示
     assert isinstance(res["report"], str) and res["report"]
     assert res["report"].rstrip().endswith("仅供参考，不构成投资建议")
 
+
     # ── snapshot 严格对齐前端 mock 结构（normalize.js / mock.js）──
     snap = res["snapshot"]
-    assert set(snap) == {"index_minute", "limit_ladder", "sectors", "sentiment", "source", "degraded"}
+    # R11-7：快照新增 breadth（涨跌分布）
+    assert set(snap) == {
+        "index_minute", "limit_ladder", "sectors", "sectors_bottom",
+        "sentiment", "breadth", "source", "degraded",
+    }
+    assert isinstance(snap["breadth"], dict) and "distribution" in snap["breadth"]
+    # P0-2：分布键名必须为含 % 规范键（与前端 BREADTH_ORDER 对齐）
+    assert set(snap["breadth"]["distribution"]) == {
+        "涨停", "跌停", "涨5%-10%", "涨2%-5%", "涨0%-2%",
+        "平盘", "跌0%-2%", "跌2%-5%", "跌5%以上",
+    }
+    assert snap["breadth"]["note"] == "测试分布说明（降级时透传）"  # P1-H：note 透传
     assert snap["index_minute"][0]["name"] == "上证指数"
     assert snap["index_minute"][0]["points"][0] == {"time": "09:30", "value": 3760.0}
     assert set(snap["limit_ladder"]) == {"up", "down"}
@@ -237,6 +311,9 @@ def test_review_full_chain(fake_fetch, iso_dirs):
     assert snap["limit_ladder"]["down"][0] == {"label": "跌停", "count": 3, "stocks": []}
     assert snap["sectors"][0] == {"name": "半导体", "pct_change": 0.02, "leader": "示例科技"}
     assert snap["sectors"][1] == {"name": "军工", "pct_change": 0.015, "leader": "示例军工"}
+    # P1-K：板块跌幅榜 bottom5 透传（跌幅最大在前）
+    assert snap["sectors_bottom"][0] == {"name": "保险", "pct_change": -0.03, "leader": "示例保险"}
+    assert snap["sectors_bottom"][1] == {"name": "煤炭", "pct_change": -0.02, "leader": "示例煤炭"}
     sent = snap["sentiment"]
     assert set(sent) == {
         "up_count", "down_count", "limit_up_count", "limit_down_count", "red_rate",
@@ -268,8 +345,8 @@ def test_review_full_chain(fake_fetch, iso_dirs):
     assert item["record_id"] == record_id
     assert item["mode"] == "close" and item["mode_label"] == "收盘复盘"
 
-    # ── 详情（report.json 展开 analyses/debate_history）──
-    r = client.get(f"/api/reviews/2020-01-02/{meta['time']}")
+    # ── 详情（R11 R4：单日期路由；report.json 展开 analyses/debate_history）──
+    r = client.get("/api/reviews/2020-01-02")
     assert r.status_code == 200, r.text
     body = r.json()
     assert set(body) == {"meta", "report", "analyses", "debate_history", "snapshot"}
@@ -277,7 +354,9 @@ def test_review_full_chain(fake_fetch, iso_dirs):
     assert isinstance(body["analyses"], list) and len(body["analyses"]) == 5
     for analyst in body["analyses"]:
         assert analyst.get("skill_name") and analyst.get("analysis")
-    assert isinstance(body["debate_history"], list) and len(body["debate_history"]) >= 1
+    # P1-C（2026-08-07）：降级（规则引擎）模式下无多空分歧可跳过辩论（0 轮）；
+    # 有轮次则每轮结构必须完整。
+    assert isinstance(body["debate_history"], list)
     for entry in body["debate_history"]:
         assert entry.get("round") and isinstance(entry.get("responses"), list)
         for resp in entry["responses"]:
@@ -285,14 +364,36 @@ def test_review_full_chain(fake_fetch, iso_dirs):
     assert body["snapshot"] == snap
 
     # ── 删除 204（无 body）→ 再删 404 中文 ──
-    r = client.delete(f"/api/reviews/2020-01-02/{meta['time']}")
+    r = client.delete("/api/reviews/2020-01-02")
     assert r.status_code == 204
     assert r.content == b""
-    r = client.delete(f"/api/reviews/2020-01-02/{meta['time']}")
+    r = client.delete("/api/reviews/2020-01-02")
     assert r.status_code == 404
     assert "复盘记录不存在" in r.json()["detail"]
     r = client.get("/api/reviews")
     assert r.json() == []
+
+    # ── R11 R4 并发去重：同一天已有 done 记录 → 409 中文（每日一份）──
+    r = client.post("/api/reviews", json={"date": "2020-01-02", "mode": "close", "max_rounds": 2})
+    assert r.status_code == 200
+    job = _wait_job(r.json()["job_id"])
+    assert job["status"] == "done", job
+    r = client.post("/api/reviews", json={"date": "2020-01-02", "mode": "close"})
+    assert r.status_code == 409
+    assert "已有复盘记录" in r.json()["detail"]
+
+
+def test_review_fails_when_llm_unavailable(fake_fetch, iso_dirs, monkeypatch):
+    """2026-08-10 用户确认契约：LLM 不可用 → 复盘任务 error（中文消息透传，
+    不再降级生成规则报告）。"""
+    monkeypatch.setattr(graph, "_llm_ready", lambda: False)
+    r = client.post("/api/reviews", json={"date": "2020-01-03", "mode": "close", "max_rounds": 2})
+    assert r.status_code == 200, r.text
+    job = _wait_job(r.json()["job_id"])
+    assert job["status"] == "error", job
+    assert "LLM 不可用" in job["error"]
+    assert "本次复盘终止" in job["error"]
+    assert job["message"] == job["error"]
 
 
 # ── 窗口判定 ──
@@ -341,6 +442,217 @@ def test_historical_intraday_allowed(fake_fetch, iso_dirs, monkeypatch):
     assert job["result"]["meta"]["mode"] == "intraday_am"
 
 
+# ── R11 R2：status 接口（自动复盘状态）──
+
+def test_status_monday_morning(iso_dirs, monkeypatch):
+    """周一 15:00 前 → latest_date = 上周五；未过 15:00 不可自动触发。"""
+    monkeypatch.setattr(bm, "_now", lambda: datetime(2026, 8, 3, 10, 0, 0))  # 周一
+    r = client.get("/api/reviews/status", params={"date": "2026-08-03"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["date"] == "2026-08-03"
+    assert body["is_trading_day"] is True
+    assert body["latest_date"] == "2026-07-31"  # 上周五（跨周）
+    assert body["latest_mode"] == "intraday_am"
+    assert body["has_today_review"] is False
+    assert body["pending_job_id"] is None
+    assert body["can_auto"] is False
+
+
+def test_status_after_close_can_auto(iso_dirs, monkeypatch):
+    """交易日 15:00 后且无当日复盘/进行中任务 → latest_date=date 本身，can_auto=True。"""
+    monkeypatch.setattr(bm, "_now", lambda: datetime(2026, 8, 3, 16, 0, 0))  # 周一 16:00
+    r = client.get("/api/reviews/status", params={"date": "2026-08-03"})
+    body = r.json()
+    assert body["latest_date"] == "2026-08-03"
+    assert body["latest_mode"] == "close"
+    assert body["has_today_review"] is False
+    assert body["can_auto"] is True
+
+
+def test_status_weekend(iso_dirs, monkeypatch):
+    """非交易日（周六）→ 最近交易日（周五），can_auto=False。"""
+    monkeypatch.setattr(bm, "_now", lambda: datetime(2026, 8, 8, 16, 0, 0))  # 周六
+    r = client.get("/api/reviews/status", params={"date": "2026-08-08"})
+    body = r.json()
+    assert body["is_trading_day"] is False
+    assert body["latest_date"] == "2026-08-07"  # 周五
+    assert body["can_auto"] is False
+
+
+def test_status_has_review_blocks_auto(iso_dirs, monkeypatch):
+    """已有当日复盘 → has_today_review=True，can_auto=False。"""
+    save_review(
+        {
+            "date": "2026-08-03",
+            "time": "150500",
+            "mode": "close",
+            "mode_label": "收盘复盘",
+            "summary": "当日收盘",
+            "disclaimer": "仅供参考，不构成投资建议",
+        },
+        "# 当日报告",
+    )
+    monkeypatch.setattr(bm, "_now", lambda: datetime(2026, 8, 3, 16, 0, 0))
+    r = client.get("/api/reviews/status", params={"date": "2026-08-03"})
+    body = r.json()
+    assert body["has_today_review"] is True
+    assert body["can_auto"] is False
+
+
+def test_status_pending_job(iso_dirs, monkeypatch):
+    """当天有进行中 job → pending_job_id 返回任务 id，can_auto=False。"""
+    with bm._lock:
+        bm.JOBS["r11_job_running"] = {
+            "job_id": "r11_job_running",
+            "status": "running",
+            "stage": "fetch",
+            "pct": 10,
+            "message": "取数中",
+            "analysts_done": 0,
+            "analysts_total": 5,
+            "result": None,
+            "error": None,
+            "_created": 0.0,
+            "_finished": None,
+            "_date": "2026-08-03",
+        }
+    try:
+        monkeypatch.setattr(bm, "_now", lambda: datetime(2026, 8, 3, 16, 0, 0))
+        r = client.get("/api/reviews/status", params={"date": "2026-08-03"})
+        body = r.json()
+        assert body["pending_job_id"] == "r11_job_running"
+        assert body["can_auto"] is False
+        # 轮询契约不外泄内部字段（_date 不下发）
+        job = client.get("/api/jobs/r11_job_running").json()
+        assert not any(k.startswith("_") for k in job)
+    finally:
+        with bm._lock:
+            bm.JOBS.pop("r11_job_running", None)
+
+
+def test_status_validation():
+    r = client.get("/api/reviews/status")
+    assert r.status_code == 400 and "date" in r.json()["detail"]
+    r = client.get("/api/reviews/status", params={"date": "2026/08/03"})
+    assert r.status_code == 400 and "日期" in r.json()["detail"]
+    r = client.get("/api/reviews/status", params={"date": "2026-13-99"})
+    assert r.status_code == 400
+
+
+def test_post_dedup_in_progress_job(fake_fetch, iso_dirs, monkeypatch):
+    """R11 R4：进行中 job 存在时不重复创建（409 中文）。"""
+    with bm._lock:
+        bm.JOBS["r11_job_pending"] = {
+            "job_id": "r11_job_pending",
+            "status": "running",
+            "stage": "fetch",
+            "pct": 10,
+            "message": "取数中",
+            "analysts_done": 0,
+            "analysts_total": 5,
+            "result": None,
+            "error": None,
+            "_created": 0.0,
+            "_finished": None,
+            "_date": "2026-08-03",
+        }
+    try:
+        monkeypatch.setattr(bm, "_now", lambda: datetime(2026, 8, 3, 16, 0, 0))
+        r = client.post("/api/reviews", json={"date": "2026-08-03", "mode": "close"})
+        assert r.status_code == 409
+        assert "进行中" in r.json()["detail"]
+    finally:
+        with bm._lock:
+            bm.JOBS.pop("r11_job_pending", None)
+
+
+# ── Langfuse trace 开关（2026-08-12：脚本批量跑 trace=false 跳过，页面默认 true）──
+
+def test_review_trace_false_skips_langfuse(fake_fetch, iso_dirs, monkeypatch):
+    """trace=false：复盘正常完成，但不调用 quality.trace_review/score_review。"""
+    calls: list[str] = []
+    import stock_review_crew.quality as quality_mod
+
+    monkeypatch.setattr(
+        quality_mod, "trace_review",
+        lambda *a, **k: calls.append("trace") or "tr-off",
+    )
+    monkeypatch.setattr(
+        quality_mod, "score_review",
+        lambda *a, **k: calls.append("score") or {"score": 4, "passed": True},
+    )
+    r = client.post(
+        "/api/reviews", json={"date": "2020-01-02", "mode": "close", "trace": False}
+    )
+    assert r.status_code == 200, r.text
+    job = _wait_job(r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert calls == [], f"trace=false 不应上报 Langfuse：{calls}"
+    assert job["result"]["quality"] is None
+
+
+def test_review_trace_default_true(fake_fetch, iso_dirs, monkeypatch):
+    """不传 trace 字段（前端页面行为）：默认上报 Langfuse trace + score。"""
+    calls: list[str] = []
+    import stock_review_crew.quality as quality_mod
+
+    monkeypatch.setattr(
+        quality_mod, "trace_review",
+        lambda *a, **k: calls.append("trace") or "tr-on",
+    )
+    monkeypatch.setattr(
+        quality_mod, "score_review",
+        lambda *a, **k: calls.append("score") or {"score": 4, "passed": True},
+    )
+    r = client.post("/api/reviews", json={"date": "2020-01-02", "mode": "close"})
+    assert r.status_code == 200, r.text
+    job = _wait_job(r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert calls == ["trace", "score"], f"默认应上报 Langfuse：{calls}"
+    assert job["result"]["quality"] == {"score": 4, "passed": True}
+
+
+def test_review_job_langfuse_scope_flag(fake_fetch, iso_dirs, monkeypatch):
+    """2026-08-12：前端复盘（默认 trace=true）job 内 LLM 回调开关为 True；
+    脚本 trace=false 为 False；job 结束（主线程）复位为 False。"""
+    import stock_review_crew.graph as graph_mod
+    from stock_review_crew import config as cfg
+
+    seen: list[bool] = []
+    original_build = graph_mod.build_graph  # fake_fetch fixture 已替换为假图
+
+    def wrapped(**kwargs):
+        compiled = original_build(**kwargs)
+        orig_invoke = compiled.invoke
+
+        def invoke(initial):
+            seen.append(cfg.langfuse_callbacks_enabled())
+            return orig_invoke(initial)
+
+        compiled.invoke = invoke
+        return compiled
+
+    monkeypatch.setattr(graph_mod, "build_graph", wrapped)
+
+    # 前端页面：不传 trace → 默认 true → LLM 回调开启
+    r = client.post("/api/reviews", json={"date": "2020-01-02", "mode": "close"})
+    assert r.status_code == 200, r.text
+    job = _wait_job(r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert seen == [True], f"前端复盘应开启 LLM 回调：{seen}"
+
+    # 脚本：trace=false → 回调关闭
+    r = client.post("/api/reviews", json={"date": "2020-01-03", "mode": "close", "trace": False})
+    assert r.status_code == 200, r.text
+    job = _wait_job(r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert seen == [True, False], f"trace=false 应关闭 LLM 回调：{seen}"
+
+    # job 结束后开关复位（主线程上下文未被污染）
+    assert cfg.langfuse_callbacks_enabled() is False
+
+
 # ── 参数校验 400 ──
 
 def test_invalid_date_mode_400():
@@ -354,6 +666,8 @@ def test_invalid_date_mode_400():
     assert r.status_code == 400 and "mode" in r.json()["detail"]
     r = client.post("/api/reviews", json={"date": "2026-08-01", "mode": "close", "max_rounds": "abc"})
     assert r.status_code == 400 and "max_rounds" in r.json()["detail"]
+    r = client.post("/api/reviews", json={"date": "2026-08-01", "mode": "close", "trace": "false"})
+    assert r.status_code == 400 and "trace" in r.json()["detail"]
     r = client.post("/api/reviews", json=[1, 2])
     assert r.status_code == 400 and "JSON 对象" in r.json()["detail"]
 

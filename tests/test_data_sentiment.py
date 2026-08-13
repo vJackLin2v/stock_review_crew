@@ -117,6 +117,8 @@ def test_sentiment_tushare_precise(monkeypatch):
 
 def test_sentiment_em_fallback(monkeypatch):
     """Tushare 失败 → 东财（昨日涨停池 + 实时快照），degraded 可见。"""
+    monkeypatch.setattr(sd, "_sentiment_from_realtime", lambda date: (_ for _ in ()).throw(
+        sd.DataSourceError("离线测试禁用盘中实时")))
     monkeypatch.setattr(sd, "_ts_daily", lambda d: (_ for _ in ()).throw(
         sd.DataSourceError("未配置 TUSHARE_TOKEN，Tushare 数据源不可用（走降级链）")))
     from test_data_common import make_zt_pool_df
@@ -143,6 +145,12 @@ def test_sentiment_em_fallback(monkeypatch):
 
 def test_sentiment_tdx_fallback(monkeypatch):
     """通达信本地兜底：日线文件计算，估算标注。"""
+    monkeypatch.setattr(sd, "_sentiment_from_realtime", lambda date: (_ for _ in ()).throw(
+        sd.DataSourceError("离线测试禁用盘中实时")))
+    monkeypatch.setattr(sd, "_sentiment_from_em", lambda date: (_ for _ in ()).throw(
+        sd.DataSourceError("离线测试禁用东财推算")))
+    monkeypatch.setattr(sd, "_sentiment_from_ths", lambda date: (_ for _ in ()).throw(
+        sd.DataSourceError("离线测试禁用同花顺")))
     root = fresh_tmp_dir("sent_tdx")
     for market, code, closes in (
         ("sh", "600001", (10.0, 11.0, 12.1)),   # 昨涨停 → 今 +10%
@@ -169,6 +177,12 @@ def test_sentiment_tdx_fallback(monkeypatch):
 
 def test_sentiment_all_fail_missing(monkeypatch):
     """全部失败：缺失块，None 占位（禁 0）。"""
+    monkeypatch.setattr(sd, "_sentiment_from_realtime", lambda date: (_ for _ in ()).throw(
+        sd.DataSourceError("离线测试禁用盘中实时")))
+    monkeypatch.setattr(sd, "_sentiment_from_em", lambda date: (_ for _ in ()).throw(
+        sd.DataSourceError("离线测试禁用东财推算")))
+    monkeypatch.setattr(sd, "_sentiment_from_ths", lambda date: (_ for _ in ()).throw(
+        sd.DataSourceError("离线测试禁用同花顺")))
     monkeypatch.setattr(sd, "_ts_daily", lambda d: (_ for _ in ()).throw(sd.DataSourceError("无 token")))
     monkeypatch.setattr(sd, "_em_zt_pool_previous", lambda date: pd.DataFrame())
     monkeypatch.setattr(sd, "_em_spot", lambda: pd.DataFrame())
@@ -185,6 +199,8 @@ def test_sentiment_all_fail_missing(monkeypatch):
 
 def test_sentiment_missing_today_data(monkeypatch):
     """今日（盘中）无 Tushare 日线 → 链上东财，而不是错报 0。"""
+    monkeypatch.setattr(sd, "_sentiment_from_realtime", lambda date: (_ for _ in ()).throw(
+        sd.DataSourceError("离线测试禁用盘中实时")))
     monkeypatch.setattr(sd, "_ts_daily", lambda d: _prev_daily() if d == "20260730" else pd.DataFrame())
     monkeypatch.setattr(sd, "_ts_stock_basic", _basic_df)
     from test_data_common import make_zt_pool_df

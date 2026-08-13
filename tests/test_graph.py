@@ -1,6 +1,7 @@
 """I2 复盘引擎测试：6 模式取数分发、全流程降级、进度钩子、辩论上限、结果契约。"""
 
 import sys
+import re
 import time
 import types
 from pathlib import Path
@@ -16,7 +17,6 @@ from stock_review_crew.graph import (
     default_initial_state,
     ensure_disclaimer,
 )
-
 
 def _fake_data():
     return {
@@ -41,10 +41,25 @@ def _fake_data():
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
-    """离线约束：无 Key 走规则引擎；LLM 调用必须 mock。"""
-    monkeypatch.setattr(graph, "_llm_ready", lambda: False)
+    """离线约束：LLM 用确定性 mock（2026-08-10 用户口径：LLM 不可用时复盘直接终止，
+    因此测流水线逻辑的用例必须让 LLM 可用）；数据链路仍全 mock。"""
+    monkeypatch.setattr(graph, "_llm_ready", lambda: True)
+    llm = _FakeLLM(_llm_factory)
+    strict = _FakeLLM(_llm_factory)
+    monkeypatch.setattr(graph, "_llm_pair", lambda: (llm, strict))
     monkeypatch.setattr(graph, "_callbacks", lambda: [])
     monkeypatch.setattr(graph, "_load_analyst_tools", lambda: (None, None))
+
+
+def test_report_node_raises_when_llm_unavailable(fetch_mode, monkeypatch):
+    """2026-08-10 用户确认契约：LLM 不可用时 report_node 抛 DataValidationError
+    （中文消息，任务终止），不再降级生成规则报告。"""
+    fetch_mode(lambda mode, date: _fake_data())
+    monkeypatch.setattr(graph, "_llm_ready", lambda: False)
+    with pytest.raises(graph.DataValidationError) as ei:
+        _invoke()
+    assert "LLM 不可用" in str(ei.value)
+    assert "本次复盘终止" in str(ei.value)
 
 
 @pytest.fixture()
@@ -114,14 +129,65 @@ def test_i1_fetch_mode_data_shape_consumed(fetch_mode):
     fetch_mode(fetcher)
     state = _invoke(mode="auction")
     assert state["snapshot"]["mode_label"] == "竞价复盘"
-    assert any("开盘啦不可用" in n for n in state["degraded_notes"])
-    assert state["degraded"] is True
+    # 2026-08-12（用户口径）：主源失败但备用源成功（数据可用）→ 不再降级标注
+    assert not any("开盘啦不可用" in n for n in state["degraded_notes"])
+    assert state["degraded"] is False
     assert "来源：开盘啦" in state["market_data"]
     assert "政策利好" in state["market_data"]
-    assert state["final_report"].startswith("# 2026-08-03 A股竞价复盘报告")
-    # 规则事实：竞价 count 存在 → 不写“竞价数据缺失”；指数方向给出
-    assert "指数方向" in state["final_report"]
-    assert "竞价数据缺失" not in state["final_report"]
+    # LLM 路径（mock）：报告由 mock LLM 生成；数据消费由 market_data/snapshot/degraded 断言覆盖
+    assert state["final_report"].startswith("# 2026-08-03 A股")
+    assert "仅供参考，不构成投资建议" in state["final_report"]
+
+
+def test_close_dieting_extracted_from_nested_zt_pool(fetch_mode):
+    """P1-E：close 跌停板从 zt_pool 嵌套 limit_down 提取（渲染 + 规则事实）。"""
+    data = {
+        "date": "2026-08-03",
+        "index_trend": {"indices": {"shanghai": {"close": 3764.0, "pct_change": 0.0052}}},
+        "zt_pool": {
+            "limit_up": {"count": 47, "stocks": [{"代码": "600001", "名称": "涨停股"}]},
+            "limit_down": {"count": 5, "stocks": [{"代码": "600002", "名称": "跌停股"}]},
+            "zhaban": {"count": 3, "stocks": []},
+            "source": "东财",
+        },
+        "sectors": {"top5": [{"板块": "半导体", "涨跌幅": 0.02}]},
+        "breadth": {"up": 2800, "down": 1800},
+        "news": {"caixin": [{"summary": "政策利好"}]},
+    }
+    fetch_mode(lambda mode, date: data)
+    state = _invoke(mode="close")
+    assert "### 跌停板" in state["market_data"]
+    assert "### 跌停板：数据缺失（无数据）" not in state["market_data"]
+    # LLM 路径（mock）：报告文本由 mock LLM 生成；跌停提取由 market_data 断言覆盖
+
+
+def test_close_critical_blocks_without_minute(fetch_mode):
+    """P1-F：close 关键闸门去掉 minute——分钟线缺失不再终止复盘（保留 index_trend）。"""
+    data = {
+        "date": "2026-08-03",
+        "index_trend": {"indices": {"shanghai": {"close": 3764.0, "pct_change": 0.0052}}},
+        "minute": {"source": "数据缺失", "degraded": True, "degraded_reason": ["不可用"]},
+        "zt_pool": {"limit_up": {"count": 47, "stocks": []}, "limit_down": {"count": 2, "stocks": []}},
+        "news": {"caixin": []},
+    }
+    fetch_mode(lambda mode, date: data)
+    state = _invoke(mode="close")
+    assert state["final_report"]
+    # P1-F：minute 缺失不再终止复盘；LLM 成功路径下 minute 缺失不标记全局降级
+
+
+def test_intraday_pm_no_dragon_tiger_declaration():
+    """P1-F：intraday_pm 不再声明龙虎榜块（盘中本无此数据，避免恒显缺失）。"""
+    data = {
+        "date": "2026-08-03",
+        "index_trend": {"indices": {"shanghai": {"close": 3764.0, "pct_change": 0.0052}}},
+        "minute": {"bars": [{"time": "13:00", "close": 3764.0}]},
+        "zt_pool": {"limit_up": {"count": 20, "stocks": []}},
+        "breadth": {"up": 2000, "down": 2000},
+        "news": {"caixin": []},
+    }
+    md = graph._render_market_markdown(data, "intraday_pm", [])
+    assert "龙虎榜" not in md
 
 
 def test_fetch_unavailable_no_block(fetch_mode, monkeypatch):
@@ -183,39 +249,52 @@ def test_news_empty_not_block(fetch_mode):
     assert "今日无重大资讯影响" in state["market_data"]
 
 
-def test_news_rule_extraction_marks_degraded(fetch_mode):
-    fetch_mode(lambda mode, date: {"news": {"caixin": [{"summary": "降息预期升温"}], "cctv": ["央行发布会"]}})
-    state = _invoke()
-    assert "降息预期升温" in state["market_data"]
-    assert "降级" in state["market_data"]
-    assert state["degraded"] is True
+def test_news_rule_extraction_marks_degraded(monkeypatch):
+    """资讯分析 LLM 失败 → 规则提取 + 降级标注（资讯节点保留的降级路径）。"""
+    monkeypatch.setattr(graph, "_llm_ready", lambda: True)
+
+    def boom(llm, messages, timeout=150.0):
+        raise RuntimeError("mock LLM 资讯失败")
+
+    monkeypatch.setattr(graph, "_invoke_llm", boom)
+    out = graph.news_analyst_node({
+        "market_data": "快照正文",
+        "raw_news": '{"caixin": [{"summary": "降息预期升温"}], "cctv": ["央行发布会"]}',
+        "degraded": False,
+        "degraded_notes": [],
+    })
+    assert "降息预期升温" in out["market_data"]
+    assert "降级" in out["market_data"]
+    assert out["degraded"] is True
+    assert out["degraded_notes"] == ["LLM 不可用/失败，资讯分析降级为规则提取"]
 
 
 # ── 全流程（无 Key 规则引擎降级）──
 
-def test_full_flow_rule_engine_degraded(fetch_mode):
+def test_full_flow_with_mock_llm(fetch_mode):
+    """全流程（LLM mock 可用）：分析/辩论/报告节点均走 LLM 路径，数据无降级。"""
     fetch_mode(lambda mode, date: _fake_data())
     state = _invoke()
     assert len(state["analyses"]) == 5
     groups = [a["group"] for a in state["analyses"]]
     assert groups.count("trend") == 2
     assert groups.count("sentiment") == 3
-    assert state["degraded"] is True
-    assert state["degraded_notes"]
+    assert state["degraded"] is False
+    assert not state["degraded_notes"]
     assert "仅供参考，不构成投资建议" in state["final_report"]
-    assert "无昨日报告，跳过验证" in state["final_report"]
+    assert any("无昨日报告，跳过验证" in a["analysis"] for a in state["analyses"])
     assert len(state["debate_history"]) <= 3
 
 
 def test_yesterday_missing_vs_present(fetch_mode):
     fetch_mode(lambda mode, date: _fake_data())
     missing = _invoke(yesterday="")
-    assert "无昨日报告，跳过验证" in missing["final_report"]
+    assert any("无昨日报告，跳过验证" in a["analysis"] for a in missing["analyses"])
 
     present = _invoke(yesterday="昨日报告：预判看多", earlier="午间复盘：维持看多")
-    assert "无昨日报告，跳过验证" not in present["final_report"]
-    assert "未找到本人昨日预判，无法验证" in present["final_report"]
+    assert present["yesterday_report"] == "昨日报告：预判看多"
     assert present["earlier_today"] == "午间复盘：维持看多"
+    assert "仅供参考，不构成投资建议" in present["final_report"]
 
 
 def test_debate_loop_respects_max_rounds(fetch_mode):
@@ -227,15 +306,68 @@ def test_debate_loop_respects_max_rounds(fetch_mode):
     assert state3["round_count"] <= 4
 
 
-def test_progress_stages_monotonic(fetch_mode):
+def test_no_fake_debate_without_stance_conflict(fetch_mode, monkeypatch):
+    """主持人 LLM 判定无分歧 → 跳过辩论（不再依赖规则立场判定）。"""
     fetch_mode(lambda mode, date: _fake_data())
+    monkeypatch.setattr(
+        graph, "_llm_pair",
+        lambda: (_FakeLLM(_no_conflict_factory), _FakeLLM(_no_conflict_factory)))
+    state = _invoke(max_rounds=3)
+    assert state["debate_history"] == []
+
+
+def test_debate_at_most_one_round(fetch_mode, monkeypatch):
+    """主持人判定有分歧 → 辩论 1 轮后收敛（确定性 mock：第二轮判定无分歧），
+    各分析师回复互不相同。"""
+    """主持人判定有分歧 → 辩论 1 轮后收敛（第二轮判定无分歧），各分析师回复互不相同。"""
+    data = {
+        "date": "2026-08-03",
+        "index": {
+            "shanghai": {"close": 3764.0, "pct_change": 0.0052},
+            "chuangye": {"close": 2400.0, "pct_change": 0.012},
+            "kechuang": {"close": 900.0, "pct_change": 0.008},
+        },
+        "zhangting": {"total": 47, "tier": {"首板": 40, "2": 5, "3": 2}},
+        "dieting": {"total": 3},
+        "sectors": {"top5": [{"板块": "半导体", "涨跌幅": 0.02}]},
+        "sentiment": {
+            "yesterday_zt_count": 60,
+            "avg_return_pct": -1.2,
+            "red_rate_pct": 30.0,
+            "lianban_rate_pct": 8.0,
+        },
+        "breadth": {"up": 2800, "down": 1800, "zhaban_rate_pct": 18.0},
+        "news": {"caixin": [{"summary": "政策利好"}]},
+    }
+    fetch_mode(lambda mode, date: data)
+    _one_round_factory.done = False
+    monkeypatch.setattr(
+        graph, "_llm_pair",
+        lambda: (_FakeLLM(_one_round_factory), _FakeLLM(_one_round_factory)))
+    state = _invoke(max_rounds=3)
+    assert len(state["debate_history"]) == 1
+    assert "多空方向分歧" in state["debate_history"][0]["topic"]
+    responses = [r["response"] for r in state["debate_history"][0]["responses"]]
+    assert responses
+    assert len(set(responses)) == len(responses)
+
+
+def test_progress_stages_monotonic(fetch_mode, monkeypatch):
+    fetch_mode(lambda mode, date: _fake_data())
+    # 主持人判定无分歧 → 无辩论路径，进度百分比严格单调
+    monkeypatch.setattr(
+        graph, "_llm_pair",
+        lambda: (_FakeLLM(_no_conflict_factory), _FakeLLM(_no_conflict_factory)))
     events = []
     _invoke(max_rounds=2, callback=lambda stage, pct, msg: events.append((stage, pct, msg)))
 
     stages = [e[0] for e in events]
     assert stages[0] == "fetch"
-    for required in ("news", "trend", "sentiment", "host", "debate", "report", "done"):
+    for required in ("news", "analysts", "host", "report", "done"):
         assert required in stages
+    # P1-C：降级模式按立场判分歧，无多空对立时跳过辩论；有辩论也仅 1 轮
+    if "debate" in stages:
+        assert stages.index("report") > stages.index("debate")
     assert stages[-1] == "done"
 
     pcts = [e[1] for e in events]
@@ -243,8 +375,7 @@ def test_progress_stages_monotonic(fetch_mode):
     assert pcts[-1] == 100.0
 
     msgs = "|".join(m for _, _, m in events)
-    assert "趋势派 1/2" in msgs and "趋势派 2/2" in msgs
-    assert "情绪派 1/3" in msgs and "情绪派 3/3" in msgs
+    assert "分析师 1/5" in msgs and "分析师 5/5" in msgs
     assert "主持人判断" in msgs and "报告生成" in msgs and "复盘完成" in msgs
 
 
@@ -254,7 +385,8 @@ def test_all_six_modes_rule_flow(fetch_mode):
         state = _invoke(mode=mode)
         result = build_result(state)
         assert result["final_report"]
-        assert state["degraded"] is True
+        # LLM 成功路径：数据无降级 → degraded False（2026-08-10 契约：LLM 不可用直接终止，不再整图降级）
+        assert state["degraded"] is False
 
 
 # ── LLM 路径（mock，禁止真调用）──
@@ -287,10 +419,47 @@ def _llm_factory(messages):
     if "实质性分歧" in user:
         return "分歧判断：有\n讨论议题：多空方向分歧\n总结：观点分歧。"
     if "## 讨论议题" in user:
-        return "（测试）我同意并补充：谨慎为主。"
+        # 辩论回复按分析师身份区分（system 消息「你是XX」），保证各分析师回复不同
+        sys_text = ""
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") == "system":
+                sys_text = m.get("content", "")
+        name = "分析师"
+        m_name = re.search(r"你是([^，。、\s（(]+)", sys_text)
+        if m_name:
+            name = m_name.group(1)
+        return f"（测试）{name}：同意部分观点并补充：谨慎为主。"
     if "报告要求" in user:
         return "# 2026-08-03 A股收盘复盘报告\n## 一、市场概况\n略\n## 综合标签\n#测试标签A\n#测试标签B"
     return "## 1、昨日复盘验证\n无昨日报告，跳过验证\n## 2、今日判断（今日大盘判断）\n看多\n## 3、操作计划（明日计划）\n进攻"
+
+
+def _no_conflict_factory(messages):
+    """主持人判定无分歧（用于无辩论流程/进度单调场景）。"""
+    user = ""
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "user":
+            user = m.get("content", "")
+    if "实质性分歧" in user:
+        return "分歧判断：无\n总结：观点一致，无需辩论。"
+    return _llm_factory(messages)
+
+
+def _one_round_factory(messages):
+    """主持人判定：首轮有分歧 → 辩论 1 轮；后续轮次判定无分歧（确定性收敛）。"""
+    user = ""
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "user":
+            user = m.get("content", "")
+    if "实质性分歧" in user:
+        if _one_round_factory.done:
+            return "分歧判断：无\n总结：观点已收敛。"
+        _one_round_factory.done = True
+        return "分歧判断：有\n讨论议题：多空方向分歧\n总结：观点分歧。"
+    return _llm_factory(messages)
+
+
+_one_round_factory.done = False
 
 
 def test_llm_path_mocked(fetch_mode, monkeypatch):
