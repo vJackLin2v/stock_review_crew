@@ -47,7 +47,9 @@ def run_smoke(date: str, mode: str, port: int = 8501, expect_window_error: bool 
               max_rounds: int = 1, timeout: float = 480.0) -> dict:
     base = f"http://127.0.0.1:{port}"
     opener = urllib.request.build_opener(_proxy_handler())
-    st, res = call(opener, base, "POST", "/api/reviews", {"date": date, "mode": mode, "max_rounds": max_rounds})
+    st, res = call(opener, base, "POST", "/api/reviews",
+                   {"date": date, "mode": mode, "max_rounds": max_rounds,
+                    "trace": False})  # 脚本冒烟不上报 Langfuse，避免 LLM 级回调拖慢
     if st != 200:
         detail = str(res.get("detail", res)) if isinstance(res, dict) else str(res)
         print(f"[{date} {mode}] POST → {st}: {detail[:200]}")

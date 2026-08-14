@@ -128,6 +128,12 @@ def _futures(symbol):
 
 def _mock_all_success(monkeypatch):
     monkeypatch.setattr(sd.config, "KAIPANLA_COOKIE", "test=1")
+    # 2026-08-14：固定 _now 到当日 14:00（盘中），消除 test_mode_blocks_all_success 的
+    # 时间依赖——凌晨跑时 _mode_end_time 会把分时 end_time 落到开盘前，导致分钟块降级、测试失败。
+    from datetime import datetime, time as _time
+
+    _fixed_now = datetime.combine(datetime.strptime(TODAY, "%Y-%m-%d").date(), _time(14, 0))
+    monkeypatch.setattr(sd, "_now", lambda: _fixed_now)
     import stock_review_crew.tools.realtime as rt_mod
 
     monkeypatch.setattr(rt_mod, "fetch_indices", lambda: {"indices": []})
@@ -276,8 +282,9 @@ def test_invalid_date_raises_chinese():
 
 
 def test_index_partial_shenzhen_missing_ok(monkeypatch):
-    """2026-08-06 用户口径：复盘指数只保留 上证/创业板/科创50（深证成指已移除，
-    不再取数与展示）；必需指数（创业板+科创50）必须保障。"""
+    """2026-08-13：深证成指加回取数（INDEX_CODES 含 shenzhen=sz399001）。
+    深证成指（非必需）全链失败时保留键并置 None（「无数据」，绝不静默）；
+    必需指数（上证/创业板/科创50）必须保障，走备用链并降级标注。"""
 
     def _tx_daily_partial(symbol):
         if symbol == "sz399001":  # 深证成指（非必需）失败
@@ -287,6 +294,8 @@ def test_index_partial_shenzhen_missing_ok(monkeypatch):
     monkeypatch.setattr(sd, "_tx_index_daily", _tx_daily_partial)
     monkeypatch.setattr(sd, "_records_from_em_kline", lambda symbol: None)
     monkeypatch.setattr(sd, "_records_from_tx_kline", lambda symbol: None)
+    monkeypatch.setattr(sd, "_records_from_tdx_remote",
+                        lambda symbol: (_ for _ in ()).throw(RuntimeError("协议源离线（mock）")))
     monkeypatch.setattr(sd, "get_cache_dir", lambda: Path(__file__).parent / "no_such_cache")
     import stock_review_crew.config as cfg
 
@@ -298,8 +307,9 @@ def test_index_partial_shenzhen_missing_ok(monkeypatch):
     assert ind["shanghai"] is not None
     assert ind["chuangye"] is not None
     assert ind["kechuang"] is not None
-    assert "shenzhen" not in ind
-    assert out["degraded"] is False  # 深证不再参与取数，无缺失可降级
+    assert "shenzhen" in ind
+    assert ind["shenzhen"] is None  # 深证缺失 → 键保留、值为 None（「无数据」）
+    assert out["degraded"] is True  # 深证主源失败 → 走备用链并降级标注
 
 
 def test_index_required_missing_still_data_missing(monkeypatch):
@@ -352,10 +362,10 @@ def test_breadth_decimal(monkeypatch):
     assert out["up"] == 2 and out["down"] == 0
     assert out["up_down_ratio"] is None  # 无下跌 → None 而非 0
     assert out["limit_up"] == 1
-    # P0-2：分布键名必须为含 % 规范键（与前端 BREADTH_ORDER 对齐）
+    # P0-2：分布键名必须为含 % 规范键；R17 细分「跌5%-7%」「跌7%以上」两档（深度扣分用）
     assert set(out["distribution"]) == {
         "涨停", "跌停", "涨5%-10%", "涨2%-5%", "涨0%-2%",
-        "平盘", "跌0%-2%", "跌2%-5%", "跌5%以上",
+        "平盘", "跌0%-2%", "跌2%-5%", "跌5%-7%", "跌7%以上",
     }
 
 

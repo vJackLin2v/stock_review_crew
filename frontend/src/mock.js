@@ -265,28 +265,7 @@ function buildAnalysts(mode, degraded, rng) {
   }));
 }
 
-function buildDebate(rng) {
-  return [
-    {
-      round: 1,
-      topic: "当前情绪处于中高位，追高与低吸如何取舍？",
-      responses: [
-        { skill_name: "趋势派·阿狼", response: "趋势未破，回踩低吸优于追高，重点看指数分时均线支撑。" },
-        { skill_name: "情绪派·炒股养家", response: "连板率尚可但炸板率偏高，分歧加大，建议降低连板接力仓位。" },
-        { skill_name: "情绪派·铁锤狂砸盘", response: "高标尾盘松动是退潮前兆，仓位控制在六成以内更稳妥。" },
-      ],
-    },
-    {
-      round: 2,
-      topic: "次日板块轮动方向如何预判？",
-      responses: [
-        { skill_name: "趋势派·爱在冰川", response: "资金高低切换明显，低位权重与二线题材补涨概率更大。" },
-        { skill_name: "情绪派·拔小弦", response: "同意，追涨当日强势板块容易吃面，潜伏低位更划算。" },
-        { skill_name: "情绪派·炒股养家", response: "补充：若竞价阶段板块高开超 2%，需警惕冲高回落。" },
-      ],
-    },
-  ];
-}
+// 改动4：buildDebate 已移除（后端 debate_history 恒空，前端不再展示辩论记录）
 
 // 生成一份完整复盘详情（对齐 GET /api/reviews/{date}/{time} 响应）
 export function buildMockReviewDetail({ date, mode, time = null, max_rounds = 2 }) {
@@ -318,7 +297,6 @@ export function buildMockReviewDetail({ date, mode, time = null, max_rounds = 2 
     meta,
     report,
     analyses: buildAnalysts(modeCode, degraded, rng),
-    debate_history: buildDebate(rng).slice(0, Math.max(1, Math.min(3, max_rounds || 2))),
     snapshot,
   };
 }
@@ -694,57 +672,6 @@ export function buildMockMarketWeather(date = isoDate(new Date())) {
       "昨日涨停红盘率 0.68：+10",
     ],
     source: "规则引擎（基于现有行情快照）",
-    degraded: false,
-    degraded_reason: [],
-  };
-}
-
-// ---- F6 纳斯达克（.IXIC 综合 + .NDX 纳指100，近 60 交易日走势）----
-function mockNasdaqPoints(base, rng) {
-  const points = [];
-  for (let i = 59; i >= 0; i -= 1) {
-    const d = new Date(Date.now() - i * 86400000);
-    const wave = Math.sin(i / 6.5) * 0.018 + Math.cos(i / 11) * 0.01 + (rng() - 0.5) * 0.004;
-    points.push({
-      date: isoDate(d),
-      close: round2(base * (1 + wave + (59 - i) * 0.0004)),
-    });
-  }
-  return points;
-}
-
-export function buildMockUsNasdaq() {
-  const rng = mulberry32(hashStr("nasdaq:r10"));
-  const ixPoints = mockNasdaqPoints(17200, rng);
-  const ndxPoints = mockNasdaqPoints(20600, rng);
-  return {
-    items: [
-      {
-        name: "纳斯达克综合",
-        symbol: ".IXIC",
-        close: ixPoints[ixPoints.length - 1].close,
-        pct_change: round4(0.0123),
-        pre_close: round2(17474.6),
-        open: null,
-        high: null,
-        low: null,
-        points: ixPoints,
-        is_today: true,
-      },
-      {
-        name: "纳指100",
-        symbol: ".NDX",
-        close: ndxPoints[ndxPoints.length - 1].close,
-        pct_change: round4(0.0187),
-        pre_close: round2(20954.2),
-        open: null,
-        high: null,
-        low: null,
-        points: ndxPoints,
-        is_today: true,
-      },
-    ],
-    source: "新浪/东财",
     degraded: false,
     degraded_reason: [],
   };

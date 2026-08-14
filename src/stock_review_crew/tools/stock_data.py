@@ -85,6 +85,7 @@ MODE_LABELS = {
 
 INDEX_CODES = {
     "shanghai": "sh000001",
+    "shenzhen": "sz399001",
     "chuangye": "sz399006",
     "kechuang": "sh000688",
 }
@@ -1081,7 +1082,8 @@ def _breadth_from_tushare(date: str) -> dict:
         "平盘": flat,
         "跌0%-2%": int(((pct < 0) & (pct > -0.02)).sum()),
         "跌2%-5%": int(((pct <= -0.02) & (pct > -0.05)).sum()),
-        "跌5%以上": int((pct <= -0.05).sum()),
+        "跌5%-7%": int(((pct <= -0.05) & (pct > -0.07)).sum()),
+        "跌7%以上": int((pct <= -0.07).sum()),
     }
     return {
         "total": len(df), "up": up, "down": down, "flat": flat,

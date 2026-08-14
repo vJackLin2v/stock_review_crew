@@ -1,8 +1,9 @@
 // R10 今日数据扩展卡片（requirements-r10 §二/§三）：
-//   F3 市场天气/情绪温度（P0）、F6 纳斯达克（P0）、F5 板块温度榜（P1）、
+//   F3 市场天气/情绪温度（P0）、F5 板块温度榜（P1）、
 //   F2 额外指数（P2）、F4 风格坐标（P2）
+// （R17：F6 纳斯达克卡片已移除）
 // 展示口径：比率小数 ×100；None → 「—」；全中文；API 失败/降级 → 中文「数据缺失/降级」态，禁止白屏。
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
 import {
   normalizeExtraIndices,
@@ -10,20 +11,8 @@ import {
   normalizeMarketSentiment,
   normalizeMarketWeather,
   normalizeSectorHeat,
-  normalizeUsNasdaq,
 } from "../normalize";
 import { fmtSignedPct, num, pctClass } from "../format";
-import { paletteOf, useSettings } from "../settings";
-import { Chart } from "./Charts";
-
-const TEXT2 = "#7a7f87";
-
-const baseTooltip = {
-  backgroundColor: "#fff",
-  borderColor: "#e7e8eb",
-  textStyle: { color: "#17181d", fontSize: 11 },
-  extraCssText: "box-shadow:0 4px 14px rgba(0,0,0,.08);border-radius:8px;",
-};
 
 const fmtPrice2 = (v) => {
   const n = num(v, NaN);
@@ -172,8 +161,8 @@ export function WeatherCard() {
             </div>
             {/* R12 统一情绪数据源：结构化指标（与复盘同源），缺失显示 — */}
             <div className="weather-metrics">
-              <span className="tag-chip light" title="涨跌家数比（上涨/下跌）">
-                涨跌比{" "}
+              <span className="tag-chip light" title="上涨家数占比（上涨/(上涨+下跌)）">
+                上涨占比{" "}
                 <b>{data.up_down_ratio != null ? `${(data.up_down_ratio * 100).toFixed(1)}%` : "—"}</b>
               </span>
               <span className="tag-chip light">
@@ -207,108 +196,6 @@ export function WeatherCard() {
                 ))}
               </div>
             ) : null}
-          </>
-        ) : null}
-      </CardState>
-    </div>
-  );
-}
-
-// ---- F6 纳斯达克（P0）：.IXIC/.NDX + 近 60 交易日 mini 走势 ----
-export function NasdaqCard() {
-  const { data, loading, error, reload } = useCardData(api.getUsNasdaq, normalizeUsNasdaq);
-  const settings = useSettings();
-  const palette = paletteOf(settings.upDownColors);
-  const option = useMemo(() => {
-    if (!data || !data.items || !data.items.length) return { series: [] };
-    const withPts = data.items.filter((it) => it.points && it.points.length);
-    if (!withPts.length) return { series: [] };
-    return {
-      tooltip: {
-        ...baseTooltip,
-        trigger: "axis",
-        formatter(params) {
-          const i = params[0].dataIndex;
-          let html = `<b>${withPts[0].points[i].date}</b>`;
-          params.forEach((pp, k) => {
-            const r = withPts[k];
-            const v = r.points[i].close;
-            if (v == null) return;
-            const first = r.points[0].close;
-            const chg = first ? (v - first) / first : null;
-            html += `<br/>${r.name}：<b>${Number(v).toFixed(2)}</b> 点`;
-            if (chg != null) {
-              html += `（<span style="color:${chg >= 0 ? palette.up : palette.down}">${
-                chg >= 0 ? "+" : ""
-              }${(chg * 100).toFixed(2)}%</span>）`;
-            }
-          });
-          return html;
-        },
-      },
-      legend: {
-        data: withPts.map((it) => it.name),
-        top: 0,
-        textStyle: { color: TEXT2, fontSize: 10 },
-      },
-      grid: { left: 48, right: 10, top: 22, bottom: 16 },
-      xAxis: {
-        type: "category",
-        data: withPts[0].points.map((p) => p.date),
-        boundaryGap: false,
-        axisLine: { lineStyle: { color: "#d8dad5" } },
-        axisLabel: { show: false },
-        axisTick: { show: false },
-      },
-      yAxis: {
-        type: "value",
-        scale: true,
-        axisLabel: { color: TEXT2, fontSize: 9.5 },
-        splitLine: { lineStyle: { color: "#eef0ec" } },
-      },
-      series: withPts.map((it, k) => ({
-        name: it.name,
-        type: "line",
-        showSymbol: false,
-        smooth: 0.25,
-        lineStyle: { width: 1.5, color: k === 0 ? palette.up : "#6d5bd0" },
-        itemStyle: { color: k === 0 ? palette.up : "#6d5bd0" },
-        data: it.points.map((p) => p.close),
-      })),
-    };
-  }, [data, palette]);
-  return (
-    <div className="card">
-      <h3 className="card-title">纳斯达克</h3>
-      <p className="card-sub">
-        最新价/涨跌幅 · 近 60 交易日走势
-        {data && data.source ? ` · ${data.source}` : ""}
-      </p>
-      <CardState loading={loading} error={error} onRetry={reload} empty={!data}>
-        {data ? (
-          <>
-            {data.items.map((it) => (
-              <div key={it.symbol || it.name} className="nasdaq-item">
-                <div className="nasdaq-id">
-                  <span className="nasdaq-name">{it.name || "—"}</span>
-                  <span className="nasdaq-symbol">{it.symbol}</span>
-                  {it.is_today === false ? <span className="nasdaq-badge">非当日</span> : null}
-                </div>
-                <div className="nasdaq-quote">
-                  <span className={`nasdaq-price ${pctClass(it.pct_change)}`}>
-                    {fmtPrice2(it.close)}
-                  </span>
-                  <span className={`nasdaq-pct ${pctClass(it.pct_change)}`}>
-                    {fmtSignedPct(it.pct_change)}
-                  </span>
-                </div>
-              </div>
-            ))}
-            <Chart option={option} height={150} emptyText="暂无走势数据" />
-            <DegradeNote
-              degraded={data.degraded}
-              reason={(data.degraded_reason || []).join("；")}
-            />
           </>
         ) : null}
       </CardState>
@@ -465,4 +352,4 @@ export function StyleCard() {
   );
 }
 
-export default { WeatherCard, NasdaqCard, SectorHeatCard, ExtraIndicesStrip, StyleCard };
+export default { WeatherCard, SectorHeatCard, ExtraIndicesStrip, StyleCard };

@@ -496,6 +496,15 @@ def test_settle_plans_no_plan_missing_quote_snapshot_at_cost(monkeypatch, data_d
     monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(data_dir))
     import stock_review_crew.accounts.engine as engine_mod
     import stock_review_crew.accounts.storage as storage_mod
+    import stock_review_crew.tools.stock_data as stock_data_mod
+
+    # 2026-08-14：get_day_quotes 缓存部分命中会补抓缺失代码，故改为 mock 主源失败
+    # 来模拟「行情缺失」（而非依赖空缓存阻断抓取的旧语义）。
+    def boom(code, date_str):
+        raise RuntimeError("主源不可用（模拟）")
+
+    monkeypatch.setattr(stock_data_mod, "fetch_stock_info", boom)
+
     # 手工构造已有账户：前一交易日买入 100 股 @10.00 冻结（T+1 未到期）
     acct = engine_mod.open_account("alang")
     acct["cash"] = 99_000.0
@@ -505,7 +514,7 @@ def test_settle_plans_no_plan_missing_quote_snapshot_at_cost(monkeypatch, data_d
     storage_mod.save_account("alang", acct)
 
     _write_plan(data_dir, "2026-07-16", [])  # 无计划
-    _write_quotes(data_dir, "2026-07-17", {})  # 缓存存在但不含持仓代码（不联网）
+    _write_quotes(data_dir, "2026-07-17", {})  # 缓存不含持仓代码 + 主源 mock 失败 → 行情缺失
 
     r = replay.settle_plans("2026-07-16", "2026-07-17")
     assert "无计划" in r.get("note", "") and "已推进账户状态" in r.get("note", "")

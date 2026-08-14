@@ -154,7 +154,7 @@ assert.equal(nl[0].date, DATE);
 assert.equal(nl[0].items[0].mode_label, modeLabel(nl[0].items[0].mode));
 assert.ok(nl[0].items[0].summary.length > 0);
 
-// ---- 详情：analyses / debate_history / snapshot 严格对齐 ----
+// ---- 详情：analyses / snapshot 严格对齐（改动4：debate_history 已移除，不再断言） ----
 const detail = buildMockReviewDetail({ date: DATE, mode: "noon" });
 const d = normalizeReviewDetail(detail);
 assert.equal(d.meta.date, DATE);
@@ -166,15 +166,6 @@ for (const a of d.analyses) {
   assert.ok(typeof a.analysis === "string" && a.analysis.length > 0, "analyst.analysis 必须存在");
   assert.ok(typeof a.suggestion === "string" && a.suggestion.length > 0, "analyst.suggestion 必须存在");
   assert.ok(Array.isArray(a.tags), "analyst.tags 必须为数组");
-}
-assert.ok(d.debate_history.length >= 1, "辩论记录至少 1 轮");
-for (const r of d.debate_history) {
-  assert.ok(Number.isInteger(r.round) && r.round >= 1);
-  assert.ok(Array.isArray(r.responses) && r.responses.length >= 1);
-  for (const resp of r.responses) {
-    assert.ok(resp.skill_name, "辩论 response.skill_name 必须存在");
-    assert.ok(resp.response, "辩论 response.response 必须存在");
-  }
 }
 assert.ok(d.report.includes("#"), "详情 report 为非空 Markdown");
 assert.ok(d.disclaimer.includes("仅供参考"), "详情恒含 disclaimer");

@@ -253,9 +253,9 @@ def get_day_quotes(date_str: str, codes: list[str] | tuple[str, ...] | set[str],
     """确保 date_str 日 codes 的行情可用，返回 payload：{date, source, quotes,
     degraded, fetched_at}。
 
-    - 缓存文件已存在（无论命中几个代码）→ 以文件为权威直接返回：不调用 fetcher、
-      不重写文件、不联网——重放离线可用且确定性（同缓存同输出）；缺失代码保持
-      缺失并在 degraded 标注，绝不静默补成成功；
+    - 缓存文件已存在 → 已命中的代码以缓存为权威（不重抓、不联网、保持确定性），
+      缺失代码逐 code 补抓并合并落盘（2026-08-14 起）；重放离线可用且确定性
+      （同缓存同输出）；补抓仍失败的代码保持缺失并在 degraded 标注，绝不静默；
     - 缓存文件不存在/损坏 → 未命中逐 code 调用 fetcher 抓取：fetcher(code) ->
       {name, pre_close, high, low, close} | None；None/抛异常 = 该代码失败 →
       degraded 标注且不在结果里（绝不静默）；fetcher 缺省 = 真实降级链
@@ -275,15 +275,16 @@ def get_day_quotes(date_str: str, codes: list[str] | tuple[str, ...] | set[str],
 
     payload = load_quotes(date_str)
     if payload is None:
-        # 无缓存文件（或损坏）→ 走降级链抓取并落盘
+        # 无缓存文件（或损坏）→ 从空缓存走降级链抓取并落盘
         payload = {"date": date_str, "source": "cache", "quotes": {},
                    "degraded": [], "fetched_at": ""}
-        quotes = payload.setdefault("quotes", {})
-        degraded = payload.setdefault("degraded", [])
-        missing = [c for c in codes if c not in quotes]
-    else:
-        # 缓存文件已存在 → 权威数据源，绝不联网/重抓（确定性 + 离线可用）
-        return payload
+    # 缓存文件已存在时：已命中的代码以缓存为权威（不重抓、保持确定性/离线可用），
+    # 缺失代码逐 code 补抓并合并落盘。2026-08-14 修复：复盘/历史重放生成的缓存是
+    # 部分快照（只含当时取数过的股票），整体当作权威直接返回会把计划股的行情挡在
+    # 缓存外 → 逐日撮合「行情缺失」0 成交。
+    quotes = payload.setdefault("quotes", {})
+    degraded = payload.setdefault("degraded", [])
+    missing = [c for c in codes if c not in quotes]
     if not missing:
         return payload
 

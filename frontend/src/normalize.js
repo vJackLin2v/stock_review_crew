@@ -72,34 +72,7 @@ export function normalizeAnalyst(x = {}, i = 0) {
   };
 }
 
-// ---- 辩论记录 [{round, topic, responses:[{skill_name, response}]}] ----
-export function normalizeDebateHistory(raw) {
-  return arr(raw)
-    .map((d, i) => {
-      if (!d || typeof d !== "object") return null;
-      if (Array.isArray(d.responses) || d.round != null || d.topic != null) {
-        return {
-          round: n(d.round) || i + 1,
-          topic: str(d.topic),
-          responses: arr(d.responses).map((r) => ({
-            skill_name: str(r && (r.skill_name || r.name || r.speaker)),
-            response: str(r && (r.response || r.point || r.content)),
-          })),
-        };
-      }
-      return {
-        round: i + 1,
-        topic: "",
-        responses: [
-          {
-            skill_name: str(d.speaker || d.name),
-            response: str(d.point || d.content),
-          },
-        ],
-      };
-    })
-    .filter(Boolean);
-}
+// 改动4：辩论记录映射已移除（后端 debate_history 恒空，前端不再展示）
 
 const ladderRow = (x) => ({
   label: str(x && x.label),
@@ -159,7 +132,6 @@ export function normalizeReport(raw = {}) {
     meta,
     report: str(r.report || r.final_report),
     analyses: arr(r.analyses || r.analyst_reports).map((x, i) => normalizeAnalyst(x, i)),
-    debate_history: normalizeDebateHistory(r.debate_history || r.debate),
     snapshot: normalizeSnapshot(r.snapshot),
     disclaimer: str(r.disclaimer) || meta.disclaimer || DEFAULT_DISCLAIMER,
     degraded,
@@ -333,6 +305,8 @@ export function normalizeAccountDetail(raw = {}) {
   return {
     skill_id: str(x.skill_id || x.id),
     name: str(x.name || x.skill_name),
+    // 改动6：账户结算日（最近交易日，用于 T+1 冻结结算；后端可能为空 → 前端显示「尚未结算」）
+    current_date: str(x.current_date),
     cash: nullable(x.cash),
     total_assets: nullable(x.total_assets),
     total_return_rate: nullableOrNull(x.total_return_rate),
@@ -548,26 +522,6 @@ export function normalizeMarketStyle(raw = {}) {
     value: nullable(x.value),
     growth: nullable(x.growth),
     hot: arr(x.hot),
-    source: str(x.source),
-    degraded: Boolean(x.degraded),
-    degraded_reason: arr(x.degraded_reason),
-  };
-}
-
-export function normalizeUsNasdaq(raw = {}) {
-  const x = raw && typeof raw === "object" ? raw : {};
-  const list = Array.isArray(x.items) ? x.items : Array.isArray(x) ? x : [];
-  const items = list.map((d) => ({
-    ...d,
-    date: str(d.date),
-    symbol: str(d.symbol),
-    is_today: d.is_today,
-    close: nullable(d.close),
-    pct_change: nullable(d.pct_change),
-  }));
-  return {
-    ...x,
-    items,
     source: str(x.source),
     degraded: Boolean(x.degraded),
     degraded_reason: arr(x.degraded_reason),

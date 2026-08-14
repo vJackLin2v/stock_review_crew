@@ -443,7 +443,15 @@ def compute_market_weather(blocks: dict) -> dict:
             out["emotion_score"] = None
             out["emotion_label"] = None
         else:
-            score = max(0, min(100, 50 + total))
+            # 深度下跌扣分（R17 敏感度增强）：同样涨跌家数比下，跌幅越深情绪越差。
+            # 从 breadth.distribution 取细分下跌档位，拿不到按 0，绝不抛异常。
+            distribution = breadth.get("distribution") \
+                if isinstance(breadth.get("distribution"), dict) else {}
+            d57 = _i(distribution.get("跌5%-7%")) or 0
+            d7 = _i(distribution.get("跌7%以上")) or 0
+            if d57 or d7:
+                total -= int(round(d57 / 100.0 * 5 + d7 / 100.0 * 10))
+            score = max(-100, min(100, 50 + total))
             out["weather"] = _weather_of(score)
             out["emotion_score"] = score
             out["emotion_label"] = _emotion_of(score)
@@ -455,6 +463,79 @@ def compute_market_weather(blocks: dict) -> dict:
         out["degraded"] = True
         out["degraded_reason"] = ["规则计算异常"]
     return out
+
+
+def classify_emotion_cycle(blocks: dict) -> str:
+    """情绪周期定位（规则引擎，纯计算，绝不编造）。返回带依据的一句话字符串。
+
+    输入 blocks = fetch_mode_data 的 blocks（含 zt_pool/sentiment/breadth 嵌套结构）。
+    提取口径（参照 compute_market_weather 对这三块的提取方式，含降级/空值处理）：
+      - zt_total = 涨停家数（zt_pool.limit_up.count 或 breadth.limit_up）
+      - zhaban_rate = 炸板率（zt_pool.zhaban_rate 或 sentiment.zhaban_rate 或
+        breadth.zhaban_rate，小数）
+      - red_rate = 昨日涨停红盘率（sentiment.red_rate，小数 0-1）
+      - avg_return = 昨日涨停平均收益（sentiment.avg_return 或 avg_return_pct/100，小数）
+    阶段判定（优先级从高到低，命中即返回，百分比一律 ×100 保留 1 位小数）：
+      1. zt_total 与 red_rate/avg_return 都拿不到 → "数据不足"
+      2. zt_total <= 20 → "冰点（涨停X家，情绪极冷）"
+      3. red_rate < 0.5 且（zhaban_rate >= 0.3 或 avg_return < 0）→ "退潮（红盘率X%、炸板率X%）"
+      4. red_rate >= 0.6 且 avg_return > 0 且 zhaban_rate < 0.25 → "主升（红盘率X%、涨停X家）"
+      5. 其余 → "修复/发酵（红盘率X%、炸板率X%）"
+    任何异常/取数失败 → "数据不足"。绝不抛异常。
+    """
+    try:
+        if not isinstance(blocks, dict):
+            blocks = {}
+        zt_pool = blocks.get("zt_pool") if isinstance(blocks.get("zt_pool"), dict) else {}
+        sentiment = blocks.get("sentiment") if isinstance(blocks.get("sentiment"), dict) else {}
+        breadth = blocks.get("breadth") if isinstance(blocks.get("breadth"), dict) else {}
+        limit_up = zt_pool.get("limit_up") if isinstance(zt_pool.get("limit_up"), dict) else {}
+
+        zt_total = _i(limit_up.get("count"))
+        if zt_total is None:
+            zt_total = _i(breadth.get("limit_up"))
+        if zt_total is None:
+            zt_total = _i(blocks.get("zt_total"))
+
+        zhaban_rate = _f(zt_pool.get("zhaban_rate"))
+        if zhaban_rate is None:
+            zhaban_rate = _f(sentiment.get("zhaban_rate"))
+        if zhaban_rate is None:
+            zhaban_rate = _f(breadth.get("zhaban_rate"))
+        if zhaban_rate is None:
+            zhaban_rate = _f(blocks.get("zhaban_rate"))
+
+        red_rate = _f(sentiment.get("red_rate"))
+        if red_rate is None:
+            red_rate = _f(blocks.get("red_rate"))
+
+        avg_return = _f(sentiment.get("avg_return"))
+        if avg_return is None:
+            avg_return = _f(sentiment.get("avg_return_pct"))
+            if avg_return is not None:
+                avg_return = avg_return / 100.0
+        if avg_return is None:
+            avg_return = _f(blocks.get("avg_return"))
+
+        def _pct(v: Optional[float]) -> str:
+            return "数据缺失" if v is None else f"{v * 100:.1f}%"
+
+        if zt_total is None and red_rate is None and avg_return is None:
+            return "数据不足"
+        if zt_total is not None and zt_total <= 20:
+            return f"冰点（涨停{zt_total}家，情绪极冷）"
+        if red_rate is not None and red_rate < 0.5 and (
+                (zhaban_rate is not None and zhaban_rate >= 0.3)
+                or (avg_return is not None and avg_return < 0)):
+            return f"退潮（红盘率{_pct(red_rate)}、炸板率{_pct(zhaban_rate)}）"
+        if (red_rate is not None and red_rate >= 0.6
+                and avg_return is not None and avg_return > 0
+                and zhaban_rate is not None and zhaban_rate < 0.25):
+            zt_txt = "数据缺失" if zt_total is None else f"{zt_total}家"
+            return f"主升（红盘率{_pct(red_rate)}、涨停{zt_txt}）"
+        return f"修复/发酵（红盘率{_pct(red_rate)}、炸板率{_pct(zhaban_rate)}）"
+    except Exception:  # noqa: BLE001 - 纯函数绝不抛异常
+        return "数据不足"
 
 
 def _fetch_weather_blocks(date: str,
@@ -1202,6 +1283,7 @@ def fetch_style_quad() -> dict:
 
 
 __all__ = [
-    "compute_market_weather", "fetch_market_weather", "fetch_market_sentiment", "fetch_us_nasdaq",
+    "compute_market_weather", "classify_emotion_cycle", "fetch_market_weather",
+    "fetch_market_sentiment", "fetch_us_nasdaq",
     "fetch_sector_heat", "fetch_extra_indices", "fetch_style_quad",
 ]

@@ -577,7 +577,10 @@ def fetch_breadth_realtime() -> dict[str, Any]:
                 down += 1
             else:
                 flat += 1
-        if total:
+        # 2026-08-14：东财 clist 曾限流仅返回 100 只（fid=f3 降序 → 涨幅榜前 100 全涨），
+        # pz=7000 不生效 → total 远小于全市场，up/down 严重失真（down=0 致涨跌比=1）。
+        # 加完整性校验：total < 3000 视为接口限流/不完整，抛异常降级新浪全市场备用源。
+        if total and total >= 3000:
             return {
                 "total": total, "up": up, "down": down, "flat": flat,
                 "up_down_ratio": round(up / down, 4) if down else None,
@@ -586,6 +589,7 @@ def fetch_breadth_realtime() -> dict[str, Any]:
                 "degraded_reason": [],
                 "note": "盘中实时全市场统计（过滤 ST/北证）",
             }
+        raise RealtimeError(f"东财全A统计不完整（仅 {total} 只，疑似接口限流）")
     except Exception as exc:  # noqa: BLE001
         em_err = exc
     # 备用：新浪全市场（akshare stock_zh_a_spot，实测 ~20s/5500 只）

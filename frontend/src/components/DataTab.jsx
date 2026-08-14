@@ -2,12 +2,15 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import {
   ExtraIndicesStrip,
-  NasdaqCard,
   SectorHeatCard,
   StyleCard,
   WeatherCard,
 } from "./TodayDataCards";
 import WatchlistPanel from "./WatchlistPanel";
+
+// 改动3：首页指数卡展示顺序固定为 上证 → 深证成指 → 创业板指 → 科创50
+// （后端 indices 顺序可能变化，按此优先级过滤并排序，保证展示顺序稳定）
+const INDEX_CARD_ORDER = ["上证指数", "深证成指", "创业板指", "科创50"];
 
 // R11-R3：数据卡不再渲染降级横幅/来源文本（来源信息保留在 title tooltip），无数据显示「—」
 const finiteNum = (v) => (v == null || v === "" ? NaN : Number(v));
@@ -166,7 +169,8 @@ export default function DataTab({ onOpenStockDetail }) {
         {rtData && rtData.indices ? (
           <div className="kpi-grid">
             {rtData.indices.indices
-              .filter((ix) => ["上证指数", "创业板指", "科创50"].includes(ix.name))
+              .filter((ix) => INDEX_CARD_ORDER.includes(ix.name))
+              .sort((a, b) => INDEX_CARD_ORDER.indexOf(a.name) - INDEX_CARD_ORDER.indexOf(b.name))
               .map((ix) => {
                 const pct = finiteNum(ix.pct_change);
                 const cls = !Number.isFinite(pct) ? "zero" : pct > 0 ? "pos" : pct < 0 ? "neg" : "zero";
@@ -323,68 +327,26 @@ export default function DataTab({ onOpenStockDetail }) {
             </div>
           ) : null}
           {quote ? (
-            <div className="rt-quote-box">
-              <div className="rt-quote-name">
-                {quote.name || "—"}
-                <span className="rt-quote-code">{quote.code}</span>
-              </div>
-              <div className={`rt-quote-price ${finiteNum(quote.pct_change) > 0 ? "pos" : finiteNum(quote.pct_change) < 0 ? "neg" : "zero"}`}>
-                {fmtPrice2(quote.price)}
-              </div>
-              <div className={`rt-quote-pct ${finiteNum(quote.pct_change) > 0 ? "pos" : finiteNum(quote.pct_change) < 0 ? "neg" : "zero"}`}>
-                {fmtSignedPct2(quote.pct_change)}
-              </div>
-              <div className="rt-quote-meta" title={quote.source ? `数据来源：${quote.source}` : undefined}>
-                <span>今开 {fmtPrice2(quote.open)}</span>
-                <span>最高 {fmtPrice2(quote.high)}</span>
-                <span>最低 {fmtPrice2(quote.low)}</span>
-                <span>昨收 {fmtPrice2(quote.pre_close)}</span>
-                <span>换手 {fmtPct2(quote.turnover_rate)}</span>
-              </div>
-              {(quote.bids && quote.bids.length) || (quote.asks && quote.asks.length) ? (
-                <div className="rt-quote-levels">
-                  <div className="rt-levels-col">
-                    {[...(quote.asks || [])].reverse().map((l, i) => (
-                      <div key={`a${i}`} className="rt-level neg">
-                        <span>卖{5 - i}</span>
-                        <span>{Number.isFinite(Number(l.price)) ? Number(l.price).toFixed(Number(l.price) < 1 ? 3 : 2) : "—"}</span>
-                        <span>{l.volume ?? "—"}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="rt-levels-col">
-                    {(quote.bids || []).map((l, i) => (
-                      <div key={`b${i}`} className="rt-level pos">
-                        <span>买{i + 1}</span>
-                        <span>{Number.isFinite(Number(l.price)) ? Number(l.price).toFixed(Number(l.price) < 1 ? 3 : 2) : "—"}</span>
-                        <span>{l.volume ?? "—"}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-              <div className="rt-quote-actions">
-                <button
-                  className="btn btn-outline btn-sm"
-                  onClick={() => onOpenStockDetail(quote.code, quote.name)}
-                >
-                  查看详情（分时/日K/分钟K/五档）
-                </button>
-              </div>
+            <div className="rt-quote-actions">
+              <button
+                className="btn btn-outline btn-sm"
+                onClick={() => onOpenStockDetail(quote.code, quote.name)}
+              >
+                查看详情（分时/日K/分钟K/五档）
+              </button>
             </div>
           ) : null}
         </div>
         <p className="rt-foot">数据仅供研究参考，实时性以各数据源为准；市场有风险，决策需谨慎。</p>
       </div>
 
-      {/* 今日数据扩展卡：市场天气 / 纳斯达克 / 板块温度榜 / 风格坐标 */}
+      {/* 今日数据扩展卡：市场天气 + 风格坐标（并排） / 板块温度榜（整行） */}
       <div className="today-cards">
         <div className="tc-grid">
           <WeatherCard />
-          <NasdaqCard />
+          <StyleCard />
         </div>
         <SectorHeatCard />
-        <StyleCard />
       </div>
 
       {/* 我的观察 + 观察列表 */}

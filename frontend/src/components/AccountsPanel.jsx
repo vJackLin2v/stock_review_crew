@@ -506,6 +506,12 @@ export default function AccountsPanel({ onBack }) {
             <div className="card">
               <h3 className="card-title">账户概览</h3>
               <p className="card-sub">初始资金 100,000 元；比率已 ×100 展示</p>
+              {/* 改动6：结算日至标注（current_date 为空 → 尚未结算） */}
+              <div className="settle-note">
+                {detail.current_date
+                  ? `账户结算至 ${detail.current_date}（未结算日至当前）`
+                  : "尚未结算"}
+              </div>
               <div className="kpi-grid" style={{ marginTop: 10 }}>
                 {kpis.map((k) => (
                   <div key={k.label} className="kpi">

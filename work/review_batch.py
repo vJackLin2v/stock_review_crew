@@ -387,7 +387,11 @@ def attempt_once(sess: requests.Session, d: str, force: bool,
     try:
         r = sess.post(f"{BASE_URL}/api/reviews",
                       json={"date": d, "mode": "close",
-                            "max_rounds": max(1, min(max_rounds, 3))},
+                            "max_rounds": max(1, min(max_rounds, 3)),
+                            # 2026-08-14：脚本批跑不上报 Langfuse（trace=false），
+                            # 关闭 LLM 级 Langfuse 回调——同步 OTLP 导出会把单次 LLM
+                            # 调用从 ~15s 拖到 180s+（PLAYBOOK 2026-08-10），批跑会慢 10 倍。
+                            "trace": False},
                       timeout=REQUEST_TIMEOUT)
     except requests.RequestException as exc:
         return "retry", f"提交任务失败（服务不可达）：{exc}"
@@ -434,6 +438,24 @@ def run_one_date(sess: requests.Session, d: date, force: bool,
     return False
 
 
+def settle_prev_day(prev_date: str, cur_date: str) -> None:
+    """逐日交错（R14）：用 cur_date 完整行情撮合 prev_date 的交易计划（增量撮合）。
+
+    写 data/accounts/，让 cur_date 复盘的分析师 get_positions 能读到前一日持仓
+    （含 T+1 冻结/现金变化）。失败不阻断复盘，只打印告警。
+    """
+    try:
+        sys.path.insert(0, str(REPO / "src"))
+        from stock_review_crew.accounts.replay import settle_plans
+
+        r = settle_plans(prev_date, cur_date)
+        print(f"[settle] {prev_date} 计划 → {cur_date} 行情撮合："
+              f"成交 {r.get('filled')} / 拒绝 {r.get('rejected')} / "
+              f"行情缺失 {len(r.get('quotes_missing') or [])}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[settle] {prev_date}→{cur_date} 撮合失败（不阻断复盘）：{exc}")
+
+
 def cmd_run(start: Optional[date], end: Optional[date],
             dates_arg: Optional[str], force: bool, max_rounds: int) -> int:
     if not check_server():
@@ -452,14 +474,21 @@ def cmd_run(start: Optional[date], end: Optional[date],
     state = load_state()
     sess = _session()
     failed: list[str] = []
+    prev_date: Optional[str] = None
     for d in days:
         date_str = d.isoformat()
         prev = state["dates"].get(date_str)
         if prev and prev.get("status") == "done" and not force:
             print(f"[run] {date_str} 已 done（断点续跑跳过，--force 可重跑）")
+            prev_date = date_str
             continue
+        # 逐日交错（2026-08-14）：先撮合前一日计划（用当天行情），再复盘当天，
+        # 否则当天分析师 get_positions 读不到前一日持仓（会误判「无持仓」）。
+        if prev_date is not None:
+            settle_prev_day(prev_date, date_str)
         if not run_one_date(sess, d, force, max_rounds, state):
             failed.append(date_str)
+        prev_date = date_str
 
     if failed:
         print(f"\n[run] 完成：{len(days) - len(failed)} 成功/跳过，"

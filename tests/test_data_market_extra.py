@@ -148,6 +148,73 @@ def test_weather_schema():
     assert out["emotion_score"] is not None
 
 
+# ── 情绪周期定位 classify_emotion_cycle（规则引擎，纯计算）──
+
+def test_emotion_cycle_data_insufficient():
+    """zt_total 与 red_rate/avg_return 都拿不到 → 「数据不足」。"""
+    assert market_extra.classify_emotion_cycle({}) == "数据不足"
+    assert market_extra.classify_emotion_cycle(None) == "数据不足"
+    assert market_extra.classify_emotion_cycle({"zt_pool": {}}) == "数据不足"
+    # 仅有涨停家数（zt_total 拿得到）→ 不算「数据不足」，落「修复/发酵」且缺失值标「数据缺失」
+    out = market_extra.classify_emotion_cycle(
+        {"zt_pool": {"limit_up": {"count": 59}}, "sentiment": {}})
+    assert out.startswith("修复/发酵")
+    assert "红盘率数据缺失" in out and "炸板率数据缺失" in out
+
+
+def test_emotion_cycle_ice_point():
+    """zt_total <= 20 → 冰点（涨停X家，情绪极冷）。"""
+    out = market_extra.classify_emotion_cycle(
+        {"zt_pool": {"limit_up": {"count": 15}, "zhaban_rate": 0.1},
+         "sentiment": {"red_rate": 0.45, "avg_return": 0.01}})
+    assert out == "冰点（涨停15家，情绪极冷）"
+
+
+def test_emotion_cycle_eclipse():
+    """red_rate<0.5 且（炸板率≥0.3 或 平均收益<0）→ 退潮（红盘率X%、炸板率X%）。"""
+    out = market_extra.classify_emotion_cycle(
+        {"zt_pool": {"limit_up": {"count": 59}, "zhaban_rate": 0.3922},
+         "sentiment": {"red_rate": 0.4583, "avg_return": -0.0114}})
+    assert out.startswith("退潮")
+    assert "红盘率45.8%" in out and "炸板率39.2%" in out
+    # 仅平均收益<0 触发（炸板率缺失 → 标注数据缺失，不编造）
+    out2 = market_extra.classify_emotion_cycle(
+        {"zt_pool": {"limit_up": {"count": 59}},
+         "sentiment": {"red_rate": 0.4, "avg_return": -0.02}})
+    assert out2.startswith("退潮") and "炸板率数据缺失" in out2
+
+
+def test_emotion_cycle_main_rise():
+    """red_rate>=0.6 且 avg_return>0 且 炸板率<0.25 → 主升（红盘率X%、涨停X家）。"""
+    out = market_extra.classify_emotion_cycle(
+        {"zt_pool": {"limit_up": {"count": 82}, "zhaban_rate": 0.18},
+         "sentiment": {"red_rate": 0.68, "avg_return": 0.032}})
+    assert out == "主升（红盘率68.0%、涨停82家）"
+
+
+def test_emotion_cycle_repair():
+    """其余 → 修复/发酵（红盘率X%、炸板率X%）。"""
+    out = market_extra.classify_emotion_cycle(
+        {"zt_pool": {"limit_up": {"count": 59}, "zhaban_rate": 0.28},
+         "sentiment": {"red_rate": 0.55, "avg_return": 0.01}})
+    assert out.startswith("修复/发酵")
+    assert "红盘率55.0%" in out and "炸板率28.0%" in out
+
+
+def test_emotion_cycle_breadth_fallback_and_never_raise():
+    """涨停家数可从 breadth.limit_up 提取；异常输入绝不抛（返回「数据不足」）。"""
+    out = market_extra.classify_emotion_cycle(
+        {"breadth": {"limit_up": 40},
+         "sentiment": {"red_rate": 0.62, "avg_return": 0.02, "zhaban_rate": 0.2}})
+    assert out.startswith("主升") and "涨停40家" in out
+
+    class BoomDict(dict):
+        def get(self, key, default=None):
+            raise RuntimeError("炸")
+
+    assert market_extra.classify_emotion_cycle({"zt_pool": BoomDict()}) == "数据不足"
+
+
 # ── fetch_market_weather：取数包装（monkeypatch close 取数）──
 
 def test_fetch_weather_ok(monkeypatch):

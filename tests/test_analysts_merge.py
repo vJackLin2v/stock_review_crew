@@ -139,6 +139,8 @@ def test_graph_has_single_analysts_node():
     assert "trend_analysts" not in nodes
     assert "sentiment_analysts" not in nodes
     assert "news_analyst" in nodes and "host" in nodes
+    # R16：辩论节点已移除——图里无 debate 节点，host 后直接 report
+    assert "debate" not in nodes
 
 
 def test_full_flow_five_analysts_one_batch(fetch_mode):

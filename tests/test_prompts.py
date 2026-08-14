@@ -35,7 +35,8 @@ def test_six_modes_defined():
         assert len(info["sections"]) >= 6
         assert len(info["analyst_titles"]) == 3
         assert any("核心观点" in s for s in info["sections"])
-        assert any("分歧" in s for s in info["sections"])
+        # R16：报告章节「分歧与讨论」改「分歧点」（无辩论语义）
+        assert any("分歧点" in s for s in info["sections"])
         assert any("风险" in s for s in info["sections"])
 
 
@@ -179,10 +180,12 @@ def test_report_prompt_length_and_dedup_constraints():
 
 
 def test_report_prompt_unit_layers_no_conflict():
-    """P1-A：单位指令分层（表格原样引用 / 正文亿元），旧自相矛盾措辞已删除。"""
+    """P1-A + R16：单位指令分层（成交额列转亿元 / 成交量原样 / 正文亿元）。"""
     p = prompts.build_report_prompt(_state())
     assert "表格列（成交量/成交额）" in p
-    assert "原样引用数据快照中的数字" in p
+    assert "成交额" in p and "一律换算为" in p and "亿元" in p
+    assert "1164203130880 元 → 11642.03 亿元" in p
+    assert "禁止把成交量当成交额" in p
     assert "一律用「亿元」展示" in p
     assert "547852512 元 → 5.48 亿元" in p
     assert "5479 万元 → 0.55 亿元" not in p
@@ -215,6 +218,24 @@ def test_quality_detect_sensitive_phrases():
     )
     assert ok["total"] == 0
     assert quality.detect_sensitive_phrases(None) == {"hits": [], "total": 0}
+
+
+def test_report_prompt_host_analysis_and_emotion_cycle_injected():
+    """R16：报告 prompt 注入主持人分歧判断（host_analysis 原文）与情绪周期定位；
+    无辩论——不组装「讨论记录」，且约束「分歧点」章节只写判断不写逐轮转写。"""
+    p = prompts.build_report_prompt(_state(
+        host_analysis="分歧判断：有\n讨论议题：多空方向分歧",
+        emotion_cycle="上升期",
+    ))
+    assert "主持人分歧判断" in p
+    assert "分歧判断：有" in p
+    assert "多空方向分歧" in p
+    assert "情绪周期定位：上升期" in p
+    assert "禁止出现辩论逐条转写" in p
+    assert "无讨论记录" not in p  # 旧「讨论记录」占位已移除
+    p2 = prompts.build_report_prompt(_state())
+    assert "无分歧判断" in p2
+    assert "情绪周期定位：数据不足" in p2
 
 
 def test_report_title():

@@ -282,7 +282,8 @@ def _snap_sentiment(data: Any) -> dict:
 
 
 def _snap_breadth(data: Any) -> Optional[dict]:
-    """涨跌分布快照（R11-7：复盘页涨跌分布用图表展示；分布区间/note 透传）。"""
+    """涨跌家数快照：保留 up/down/limit_up/limit_down/涨跌比（报告正文「上涨X家、
+    下跌X家」与前端 KPI 用）；「9 档分布 distribution」已移除（2026-08-13）。"""
     blk = _find_block(data, ("breadth", "market_breadth", "up_down"))
     if not isinstance(blk, dict):
         return None
@@ -293,8 +294,8 @@ def _snap_breadth(data: Any) -> Optional[dict]:
         "flat": _as_int(blk.get("flat")),
         "limit_up": _pick_int(blk.get("limit_up")),
         "limit_down": _pick_int(blk.get("limit_down")),
+        "up_down_ratio": _pick_ratio(blk, ("up_down_ratio",), 999.0),
         "zhaban_rate": _pick_ratio(blk, ("zhaban_rate", "zhaban_rate_pct"), 1.5),
-        "distribution": blk.get("distribution") if isinstance(blk.get("distribution"), dict) else {},
         "source": str(blk.get("source") or "数据缺失"),
         "degraded": _block_degraded(blk),
         # P1-H：备用源/降级时 note 携带「分布明细缺失」等说明，必须透传前端展示

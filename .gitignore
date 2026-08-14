@@ -30,3 +30,12 @@ frontend/dist/
 .idea/
 .vscode/
 *.log
+
+# ── 批跑产物与备份（绝不入库） ──
+work/*_result.json
+work/review_batch_state.json
+work/status.json
+work/probe_result.json
+work/archive/
+work/backup_*/
+verify_acct.js

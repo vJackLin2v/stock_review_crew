@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from "react";
-import MarkdownView, { buildToc } from "./MarkdownView";
-import { BreadthChart, Chart, IndexMinuteChart, LimitLadderChart, SectorChart, SentimentChart, SentimentKpis } from "./Charts";
+import React, { useMemo, useState } from "react";
+import MarkdownView from "./MarkdownView";
+import { IndexMinuteChart, LimitLadderChart, SectorChart, SentimentChart, SentimentKpis } from "./Charts";
 import { fmtDate, fmtDateTime, fmtTimeHM } from "../format";
 
 const AVATAR_CLASSES = ["", "v2", "v3", "v4", "v5"];
@@ -49,32 +49,16 @@ export default function ReportView({ report, offline, history, onSwitchReview })
   const meta = report.meta || {};
   const snapshot = report.snapshot || {};
   const analyses = Array.isArray(report.analyses) ? report.analyses : [];
-  const debate = Array.isArray(report.debate_history) ? report.debate_history : [];
   const degraded = Array.isArray(report.degraded) ? report.degraded : [];
-  const responseCount = debate.reduce((s, r) => s + (Array.isArray(r.responses) ? r.responses.length : 0), 0);
   const [copied, setCopied] = useState("");
 
-  // P1-R：报告目录（来自 MarkdownView 解析的标题锚点）
-  const toc = useMemo(() => buildToc(report.report), [report.report]);
-  // R11-R5：目录随滚动高亮当前章节（可选项）
-  const [activeToc, setActiveToc] = useState("");
-  useEffect(() => {
-    if (!toc.length) return;
-    const obs = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
-        if (visible.length) setActiveToc(visible[0].target.id);
-      },
-      { rootMargin: "-80px 0px -70% 0px", threshold: 0 }
-    );
-    toc.forEach((t) => {
-      const el = document.getElementById(t.id);
-      if (el) obs.observe(el);
-    });
-    return () => obs.disconnect();
-  }, [toc]);
+  // 改动1：左侧目录/标题区只显示「{date} 复盘」单一标题（不再逐条列出章节标题）。
+  // date 取报告 meta.date；close 模式即「{date} 复盘」，其余模式带模式名
+  // （如「2026-08-13 午间复盘」，避免「收盘复盘 复盘」式冗余）。
+  const tocTitle =
+    String(meta.mode) === "close"
+      ? `${fmtDate(meta.date)} 复盘`
+      : `${fmtDate(meta.date)} ${meta.mode_label || "复盘"}`.trim();
 
   // P1-W：同日其他时间点（从前端已加载的 history 分组取，无则隐藏）
   const sameDayItems = useMemo(() => {
@@ -86,11 +70,6 @@ export default function ReportView({ report, offline, history, onSwitchReview })
       (it) => `${meta.date}/${it.time}` !== `${meta.date}/${meta.time}`
     );
   }, [history, meta]);
-
-  const scrollToId = (id) => {
-    const el = document.getElementById(id);
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
 
   const scrollToTop = () => {
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -121,7 +100,7 @@ export default function ReportView({ report, offline, history, onSwitchReview })
       <div className="card-head-row">
         <div>
           <h3 className="card-title">复盘报告（Markdown）</h3>
-          <p className="card-sub">由趋势派 / 情绪派分析师点评、主持人总结与辩论后自动生成</p>
+          <p className="card-sub">由趋势派 / 情绪派分析师点评、主持人总结后自动生成</p>
         </div>
         <div className="report-copy-row">
           <button
@@ -200,33 +179,17 @@ export default function ReportView({ report, offline, history, onSwitchReview })
         </div>
       </div>
 
-      {/* R11-R5：目录固定定位——桌面右侧 sticky 列，移动端顶部横向胶囊；「返回顶部」保留 */}
-      {toc.length ? (
-        <div className="report-layout">
-          <aside className="report-toc report-toc-sticky" aria-label="报告目录">
-            <span className="report-toc-title">📑 目录</span>
-            <div className="report-toc-list">
-              {toc.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  className={`toc-chip${t.level === 1 ? " l1" : t.level === 2 ? " l2" : " l3"}${activeToc === t.id ? " active" : ""}`}
-                  aria-label={`跳转到 ${t.text}`}
-                  onClick={() => scrollToId(t.id)}
-                >
-                  {t.text}
-                </button>
-              ))}
-            </div>
-            <button type="button" className="btn btn-outline btn-sm report-toc-top" onClick={scrollToTop}>
-              ↑ 返回顶部
-            </button>
-          </aside>
-          {reportCard}
-        </div>
-      ) : (
-        reportCard
-      )}
+      {/* 改动1：左侧菜单只显示「{date} 复盘」单一标题（不再逐条列出章节标题；
+          章节锚点跳转入口移除，保留「返回顶部」） */}
+      <div className="report-layout">
+        <aside className="report-toc report-toc-sticky" aria-label="报告目录">
+          <span className="report-toc-title">{tocTitle}</span>
+          <button type="button" className="btn btn-outline btn-sm report-toc-top" onClick={scrollToTop}>
+            ↑ 返回顶部
+          </button>
+        </aside>
+        {reportCard}
+      </div>
 
       <div className="card">
         <h3 className="card-title">{analyses.length ? `${analyses.length} 位分析师点评` : "分析师点评"}</h3>
@@ -267,32 +230,7 @@ export default function ReportView({ report, offline, history, onSwitchReview })
         )}
       </div>
 
-      <div className="debate-block">
-        <details>
-          <summary>
-            🗣️ 辩论记录（{debate.length} 轮 / {responseCount} 条）
-          </summary>
-          <div>
-            {debate.length ? (
-              debate.map((r, ri) => (
-                <div key={ri} className="debate-round">
-                  <div className="debate-round-head">
-                    第 {r.round || ri + 1} 轮{r.topic ? ` · ${r.topic}` : ""}
-                  </div>
-                  {(Array.isArray(r.responses) ? r.responses : []).map((resp, i) => (
-                    <div key={i} className="debate-item">
-                      <span className="debate-speaker">{resp.skill_name || `分析师 ${i + 1}`}</span>
-                      <div style={{ marginTop: 4 }}>{resp.response || ""}</div>
-                    </div>
-                  ))}
-                </div>
-              ))
-            ) : (
-              <div className="empty">本期无辩论记录</div>
-            )}
-          </div>
-        </details>
-      </div>
+      {/* 改动4：辩论记录展示块已移除（后端 debate_history 恒空，分歧点已在报告 Markdown 内） */}
 
       <div className="card">
         <h3 className="card-title">数据快照</h3>
@@ -320,10 +258,6 @@ export default function ReportView({ report, offline, history, onSwitchReview })
           <div className="chart-block">
             <div className="chart-title">情绪指标</div>
             <SentimentChart sentiment={snapshot.sentiment} />
-          </div>
-          <div className="chart-block">
-            <div className="chart-title">全市场涨跌分布</div>
-            <BreadthChart breadth={snapshot.breadth} />
           </div>
         </div>
         <div style={{ marginTop: 14 }}>

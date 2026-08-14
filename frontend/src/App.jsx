@@ -145,18 +145,18 @@ export default function App() {
                   prev.meta.date === fresh.meta.date &&
                   prev.meta.time === fresh.meta.time;
                 if (viewRef.current !== "progress" && !sameRecord) return prev;
-                return { ...fresh, analyses: [], debate_history: [], offline: offlineFlag };
+                return { ...fresh, analyses: [], offline: offlineFlag };
               });
               if (viewRef.current === "progress") setView("report");
               loadHistory();
-              // 详情接口补全分析师点评与辩论记录（失败不阻塞报告展示）
+              // 详情接口补全分析师点评（失败不阻塞报告展示）
               api
                 .getReviewByDate(fresh.meta.date)
                 .then((raw) => {
                   const detail = normalizeReviewDetail(raw);
                   setReport((prev) =>
                     prev && prev.record_id === fresh.record_id
-                      ? { ...prev, analyses: detail.analyses, debate_history: detail.debate_history }
+                      ? { ...prev, analyses: detail.analyses }
                       : prev
                   );
                 })

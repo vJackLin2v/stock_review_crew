@@ -130,6 +130,8 @@ def _summary(skill_id: str, acct: dict, names: dict) -> dict:
         "today_trades_count": len([t for t in today_trades if t.get("status") == "成交"]),
         "today_rejected_count": len([t for t in today_trades if t.get("status") == "拒绝"]),
         "updated_at": today,
+        # R16：账户结算日（前端「结算至 X」标注用；None=尚未结算）
+        "current_date": acct.get("current_date"),
         "price_estimated": any(r.get("price_estimated") for r in rows),
         "degraded": degraded,
     }

@@ -296,12 +296,12 @@ def test_review_full_chain(fake_fetch, iso_dirs):
         "index_minute", "limit_ladder", "sectors", "sectors_bottom",
         "sentiment", "breadth", "source", "degraded",
     }
-    assert isinstance(snap["breadth"], dict) and "distribution" in snap["breadth"]
-    # P0-2：分布键名必须为含 % 规范键（与前端 BREADTH_ORDER 对齐）
-    assert set(snap["breadth"]["distribution"]) == {
-        "涨停", "跌停", "涨5%-10%", "涨2%-5%", "涨0%-2%",
-        "平盘", "跌0%-2%", "跌2%-5%", "跌5%以上",
-    }
+    assert isinstance(snap["breadth"], dict)
+    # 2026-08-13：快照 breadth 去掉「9 档分布 distribution」，保留涨跌家数（报告正文用）
+    assert "distribution" not in snap["breadth"]
+    assert snap["breadth"]["up"] == 2800 and snap["breadth"]["down"] == 1800
+    assert snap["breadth"]["limit_up"] == 45 and snap["breadth"]["limit_down"] == 3
+    assert snap["breadth"]["up_down_ratio"] is None  # 输入块无该键 → None（前端显示「—」）
     assert snap["breadth"]["note"] == "测试分布说明（降级时透传）"  # P1-H：note 透传
     assert snap["index_minute"][0]["name"] == "上证指数"
     assert snap["index_minute"][0]["points"][0] == {"time": "09:30", "value": 3760.0}

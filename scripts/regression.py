@@ -202,10 +202,11 @@ def main() -> int:
         eng_bad = [k for k in ("time data", "Bad Gateway", "Traceback", "Server Error")
                    if k in body_text]
         check("浏览器·页面无英文异常透传", not eng_bad, "; ".join(eng_bad))
-        # R11-R1：首页改 Tabs 后查询流程 = 输入 → 查询 → 行情卡 → 查看详情
+        # R11-R1：首页改 Tabs 后查询流程 = 输入 → 查询 → 查看详情（R17 已去掉个股行情五档卡，
+        # 查询后直接出现「查看详情」入口，个股详情页内仍含五档）
         pg.fill('input[placeholder*="输入名称或代码"]', "600519")
         pg.click("button:has-text('查询')", timeout=10000)
-        pg.wait_for_selector(".rt-quote-box", timeout=30000)
+        pg.wait_for_selector("button:has-text('查看详情')", timeout=30000)
         pg.click("button:has-text('查看详情（分时')", timeout=10000)
         pg.wait_for_selector(".stock-detail .detail-price", timeout=45000)
         meta = pg.text_content(".detail-meta-grid") or ""

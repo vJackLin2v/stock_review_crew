@@ -1,14 +1,14 @@
 """6 模式感知复盘引擎：LangGraph 流水线 + 进度钩子 + 无 Key 规则引擎降级（I2）。
 
 流水线：fetch（按 mode 分发取数）→ news → analysts（5 位一次并行：趋势派 2 + 情绪派 3）
-→ host → debate（循环 ≤max_rounds）→ report。
+→ host → report。
 
 - 取数优先调用 I1 纯函数接口 fetch_mode_data(mode, date, ...) -> dict；
   未落地/失败时防御性 import + try/except 降级（旧工具兜底 → 明确标注缺失），绝不阻塞；
 - LLM 无 Key/失败 → 确定性规则引擎，degraded=True 可见标注；
 - 免责声明在组装层强制追加（ensure_disclaimer）；
 - 进度钩子 _emit(stage, pct, message)：pct 单调递增；
-  阶段：fetch / news / trend n/2 / sentiment n/3 / host / debate / report / done。
+  阶段：fetch / news / analysts n/5 / host / report / done。
 """
 
 import json
@@ -50,7 +50,7 @@ __all__ = [
 
 
 # ═══════════════════════════════════════════════════════════════
-# 进度钩子（阶段序列：fetch/news/trend n/2/sentiment n/3/host/debate/report/done）
+# 进度钩子（阶段序列：fetch/news/analysts n/5/host/report/done）
 # ═══════════════════════════════════════════════════════════════
 
 # 2026-08-10：进度钩子改 ContextVar（每 job 独立上下文，多任务并发不互相覆盖；
@@ -531,10 +531,21 @@ def fetch_data_node(state):
     except Exception:  # noqa: BLE001 - 天气失败不阻断复盘
         weather_text = "无数据"
 
+    # R16：情绪周期定位（数据层 classify_emotion_cycle 由数据子代理实现，可能尚未落地 →
+    # try/except 兜底为「数据不足」，绝不阻塞复盘；data 此处为 blocks dict）
+    emotion_cycle = "数据不足"
+    try:
+        from .tools.market_extra import classify_emotion_cycle
+
+        emotion_cycle = classify_emotion_cycle(data) or "数据不足"
+    except Exception:  # noqa: BLE001 - 情绪周期定位失败不阻断复盘
+        emotion_cycle = "数据不足"
+
     _emit("fetch", 8, "行情数据获取完成")
     return {
         "market_data": market_md,
         "market_weather": weather_text,
+        "emotion_cycle": emotion_cycle,
         "raw_news": raw_news,
         "snapshot": snapshot,
         "degraded": bool(notes) or bool(state.get("degraded")),
@@ -1286,9 +1297,12 @@ def _rule_host(state):
 
 
 def host_node(state):
-    """Node3：主持人判断分歧并提炼议题；LLM 失败 → 规则关键词判断。"""
-    round_label = "首轮" if not state.get("debate_history") else f"第{state.get('round_count', 0) + 1}轮"
-    _emit("host", 50, f"主持人判断（{round_label}）…")
+    """Node3：主持人判断分歧并提炼议题；LLM 失败 → 规则关键词判断。
+
+    R16：辩论节点已移除——主持人只产出「分歧点」判断（host_analysis）并直接进入报告；
+    不再驱动辩论循环。discussion_topic/discussion_done/round_count 保留以兼容既有契约。
+    """
+    _emit("host", 50, "主持人判断（分歧点）…")
 
     content = None
     degraded = False
@@ -1299,7 +1313,7 @@ def host_node(state):
                 strict,
                 [
                     {"role": "system", "content": prompts.HOST_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompts.build_host_prompt(state, round_label)},
+                    {"role": "user", "content": prompts.build_host_prompt(state, "首轮")},
                 ],
             ).content
         except Exception:
@@ -1307,88 +1321,27 @@ def host_node(state):
     if content is None:
         degraded = True
         has_disagreement, topic = _rule_host(state)
+        # R16：规则降级版分歧判断文本（格式：分歧判断/讨论议题 + 一句话说明），
+        # 供报告「分歧点」章节直接引用
+        host_analysis = (
+            f"分歧判断：{'有' if has_disagreement else '无'}\n"
+            f"讨论议题：{topic or '无'}\n"
+            "（降级模式：LLM 不可用，分歧判断由规则引擎按指数方向与情绪数据判定）"
+        )
     else:
         has_disagreement, topic = _parse_host(content)
+        host_analysis = content
 
     new_round = state.get("round_count", 0) + 1
     max_rounds = max(1, min(int(state.get("max_rounds") or 3), 3))
     discussion_done = (not has_disagreement) or (new_round > max_rounds) or (not topic)
     return {
+        "host_analysis": host_analysis,
         "discussion_topic": topic,
         "discussion_done": discussion_done,
         "round_count": new_round,
         "degraded": bool(state.get("degraded")) or degraded,
         "degraded_notes": ["主持人 LLM 不可用/失败，分歧判断降级为规则引擎"] if degraded else [],
-    }
-
-
-# ═══════════════════════════════════════════════════════════════
-# Node4: 辩论（交叉引用，循环 ≤ max_rounds）
-# ═══════════════════════════════════════════════════════════════
-
-_RULE_DEBATE = {
-    "alang": "趋势未破前底仓不动，回踩关键均线企稳是观察点；破位则收缩，不赌反弹。",
-    "bingchuan": "方向之争不重要，逻辑在不在才重要；主升逻辑未被证伪就不必恐慌，证伪当天纠错。",
-    "baxiaoxian": "情绪分歧期重仓才是大忌；断板缩量先观察，换手放量确认再低吸。",
-    "yangjia": "一致转分歧是必然过程；高潮后先兑现一部分，等恐慌释放再考虑机会。",
-    "tiechui": "行情是走出来的不是猜出来的；现在多看少动，等确定性信号再动手。",
-}
-
-
-def debate_node(state):
-    """Node4：对议题逐位表态，引用上一轮他人观点（交叉引用）。"""
-    topic = state.get("discussion_topic", "")
-    current_round = state.get("round_count", 1) or 1
-    _emit("debate", 55 + (current_round - 1) * 10, f"辩论第 {current_round} 轮…")
-    if not topic:
-        return {"debate_history": [{"round": current_round, "topic": "无议题", "responses": []}]}
-
-    skills = {s["name"]: s for s in list_skills()}
-    all_names = [a["skill_name"] for a in (state.get("analyses") or [])]
-    all_names = list(dict.fromkeys(n for n in all_names if n in skills))
-
-    prev_response = {}
-    if state.get("debate_history"):
-        last_entry = state["debate_history"][-1]
-        for r in last_entry.get("responses", []):
-            prev_response[r["skill_name"]] = r["response"]
-
-    responses = []
-    degraded = False
-    for i, name in enumerate(all_names):
-        skill = skills[name]
-        others_text = "".join(
-            f"\n【{other_name}的观点】\n{other_resp[:500]}\n"
-            for other_name, other_resp in prev_response.items() if other_name != name
-        )
-        response = None
-        if _llm_ready():
-            try:
-                llm, _ = _llm_pair()
-                response = _invoke_llm(
-                    llm,
-                    [
-                        {"role": "system", "content": skill.get("prompt", "")},
-                        {"role": "user", "content": prompts.build_debate_prompt(skill, topic, others_text)},
-                    ],
-                ).content
-            except Exception:
-                response = None
-        if response is None:
-            degraded = True
-            base = _RULE_DEBATE.get(skill.get("id") or "", _RULE_DEBATE["tiechui"])
-            response = f"（降级模式）关于「{topic}」：{base}"
-        responses.append({
-            "skill_name": name,
-            "skill_id": skill.get("id", ""),
-            "response": response,
-        })
-        _emit("debate", 56 + (current_round - 1) * 10 + i, f"辩论第 {current_round} 轮：{name}表态完成")
-
-    return {
-        "debate_history": [{"round": current_round, "topic": topic, "responses": responses}],
-        "degraded": bool(state.get("degraded")) or degraded,
-        "degraded_notes": ["辩论 LLM 不可用/失败，观点降级为规则引擎"] if degraded else [],
     }
 
 
@@ -1649,21 +1602,6 @@ def report_node(state):
 # 图构建 / 结果组装
 # ═══════════════════════════════════════════════════════════════
 
-def router(state):
-    """host 节点后判断：继续辩论还是出报告（≤ max_rounds）。"""
-    if state.get("discussion_done", True):
-        return "report"
-    max_rounds = max(1, min(int(state.get("max_rounds") or 3), 3))
-    if (state.get("round_count") or 0) >= max_rounds:
-        return "report"
-    # P1-C（2026-08-07）：降级模式（规则引擎）最多辩论 1 轮，
-    # 避免重复生成逐字相同的规则观点，浪费轮次与报告篇幅。
-    # round_count>=2 表示已辩论过 1 轮，再次回到 host 时结束。
-    if state.get("degraded") and (state.get("round_count") or 0) >= 2:
-        return "report"
-    return "debate"
-
-
 def default_initial_state(date, mode=DEFAULT_MODE, max_rounds=3,
                           yesterday_report="", earlier_today="", skill_names=None):
     """完整初始状态（I4 上下文注入：yesterday_report / earlier_today，缺失为空串）。"""
@@ -1677,10 +1615,12 @@ def default_initial_state(date, mode=DEFAULT_MODE, max_rounds=3,
         "market_data": "",
         "raw_news": "",
         "snapshot": {},
+        "emotion_cycle": "数据不足",
         "analyses": [],
         "discussion_topic": "",
         "discussion_done": False,
         "round_count": 0,
+        "host_analysis": "",
         "debate_history": [],
         "final_report": "",
         "overall_tags": [],
@@ -1691,7 +1631,7 @@ def default_initial_state(date, mode=DEFAULT_MODE, max_rounds=3,
 
 
 def build_graph(progress_callback=None):
-    """构建并编译 LangGraph：fetch → news → analysts → host ⇄ debate → report。"""
+    """构建并编译 LangGraph：fetch → validate → news → analysts → host → report。"""
     set_progress_callback(progress_callback)
     _reset_progress()
     graph = StateGraph(ReviewState)
@@ -1701,7 +1641,6 @@ def build_graph(progress_callback=None):
     graph.add_node("news_analyst", news_analyst_node)
     graph.add_node("analysts", analysts_node)
     graph.add_node("host", host_node)
-    graph.add_node("debate", debate_node)
     graph.add_node("report", report_node)
 
     graph.set_entry_point("fetch_data")
@@ -1709,24 +1648,21 @@ def build_graph(progress_callback=None):
     graph.add_edge("validate_data", "news_analyst")
     graph.add_edge("news_analyst", "analysts")
     graph.add_edge("analysts", "host")
-    graph.add_conditional_edges("host", router, {
-        "report": "report",
-        "debate": "debate",
-    })
-    graph.add_edge("debate", "host")
+    graph.add_edge("host", "report")
     graph.add_edge("report", END)
     return graph.compile()
 
 
 def build_result(state) -> dict:
     """§五 result.report 严格结构：{final_report, analysts[], debate_history[],
-    overall_tags[], disclaimer, degraded, round_count}；免责声明组装层强制。"""
+    overall_tags[], disclaimer, degraded, round_count}；免责声明组装层强制。
+    R16：辩论节点已移除——debate_history 恒空、round_count 恒 0（报告契约兼容）。"""
     return {
         "final_report": ensure_disclaimer(state.get("final_report") or ""),
         "analyses": state.get("analyses") or [],
-        "debate_history": state.get("debate_history") or [],
+        "debate_history": [],
         "overall_tags": state.get("overall_tags") or [],
         "disclaimer": DISCLAIMER,
         "degraded": bool(state.get("degraded")),
-        "round_count": state.get("round_count") or 0,
+        "round_count": 0,
     }

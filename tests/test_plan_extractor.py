@@ -152,3 +152,53 @@ def test_structured_cheng_no_duplicate(monkeypatch, data_dir):
     """结构化成数式只匹配一次（2026-08-10 曾单日单股 4 条 pending 的回归防线）。"""
     _, plans = _run(monkeypatch, data_dir, "买入 002384 东山精密：买入价189.00元，仓位2成", set())
     assert len(plans) == 1, f"统一正则重复匹配: {plans}"
+
+
+def test_buy_with_reason_tail(monkeypatch, data_dir):
+    """R16：买入行带「，原因是XXX」尾部（无前缀）→ 仍正确解析 code/buy/3.90/cheng=1；
+    原因文本不被误解析成代码/价格/成数。"""
+    tool_log, plans = _run(
+        monkeypatch, data_dir,
+        "002172：买入价3.90元，仓位1成，原因是医疗服务2板龙头、医药主线净流入43亿", set()
+    )
+    assert len(plans) == 1, plans
+    d = plans[0]
+    assert d["code"] == "002172" and d["side"] == "buy"
+    assert abs(d["target_price"] - 3.90) < 1e-9
+    assert d["position_cheng"] == 1 and d["qty"] is None
+    assert d["source"] == "regex_cheng"
+    assert d["name"] == "002172", "名称缺失落盘用 code"
+    assert len(tool_log) == 1 and tool_log[0]["type"] == "place_order_auto"
+    assert tool_log[0]["code"] == "002172" and tool_log[0]["side"] == "buy"
+
+
+def test_buy_with_reason_tail_and_prefix(monkeypatch, data_dir):
+    """R16：带「买入」前缀 + 原因尾部 → 解析一致（side 由前缀判定，成数不因尾部改变）。"""
+    tool_log, plans = _run(
+        monkeypatch, data_dir,
+        "买入 002172：买入价3.90元，仓位1成，原因是医疗服务2板龙头", set()
+    )
+    assert len(plans) == 1, plans
+    d = plans[0]
+    assert d["code"] == "002172" and d["side"] == "buy"
+    assert abs(d["target_price"] - 3.90) < 1e-9
+    assert d["position_cheng"] == 1 and d["qty"] is None
+    assert d["source"] == "regex_cheng"
+    assert len(tool_log) == 1 and tool_log[0]["type"] == "place_order_auto"
+    assert tool_log[0]["code"] == "002172" and tool_log[0]["side"] == "buy"
+
+
+def test_sell_with_reason_tail_still_parses(monkeypatch, data_dir):
+    """R16：卖出行即使带原因尾部（不应出现，但防御）也能解析且卖出语义不变。"""
+    tool_log, plans = _run(
+        monkeypatch, data_dir,
+        "卖出 000967：卖出价12.50元，仓位3成，原因是冲高兑现", {"000967"}
+    )
+    assert len(plans) == 1, plans
+    d = plans[0]
+    assert d["code"] == "000967" and d["side"] == "sell"
+    assert abs(d["target_price"] - 12.50) < 1e-9
+    assert d["position_cheng"] == 3 and d["qty"] is None
+    assert d["source"] == "regex_cheng"
+    assert len(tool_log) == 1 and tool_log[0]["type"] == "place_order_auto"
+    assert tool_log[0]["side"] == "sell"

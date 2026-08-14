@@ -10,7 +10,6 @@ import {
   buildMockRealtime,
   buildMockReviewDetail,
   buildMockSectorHeat,
-  buildMockUsNasdaq,
   isoDate,
   mockChatReply,
   mockChatSessionList,
@@ -257,16 +256,6 @@ export async function getMarketSentiment() {
     return d;
   } catch (err) {
     if (canFallback()) return buildMockMarketWeather();
-    throw err;
-  }
-}
-
-// GET /api/data/us-nasdaq — F6 纳斯达克（.IXIC/.NDX + 近 60 日走势）
-export async function getUsNasdaq() {
-  try {
-    return await requestJson("/api/data/us-nasdaq");
-  } catch (err) {
-    if (canFallback()) return buildMockUsNasdaq();
     throw err;
   }
 }
@@ -1031,8 +1020,6 @@ const MOCK_STEPS = [
   { stage: "sentiment", pct: 58, done: 2, msg: "情绪派 2/3 · 铁锤狂砸盘 完成点评" },
   { stage: "sentiment", pct: 66, done: 3, msg: "情绪派 3/3 · 拔小弦 完成点评" },
   { stage: "host", pct: 76, msg: "主持人正在汇总各方观点…" },
-  { stage: "debate", pct: 86, msg: "辩论第 1/2 轮进行中…" },
-  { stage: "debate", pct: 92, msg: "辩论第 2/2 轮完成，意见收敛" },
   { stage: "report", pct: 97, msg: "正在生成 Markdown 报告（强制附加免责声明）…" },
   { stage: "done", pct: 100, msg: "复盘完成" },
 ];

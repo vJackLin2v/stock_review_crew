@@ -578,3 +578,31 @@
 > 6. **遗留**：① 重放重建历史快照（`python work/account_replay.py --rebuild`）待执行，执行后
 >    旧账户现价才能显示真实历史收盘价；② 根目录约 40 个 pytest-cache-files-* 沙箱缓存残留
 >    （沙箱删不掉，建议主环境清理）；③ pyproject.toml 已移除 streamlit 依赖（app.py 已删）。
+
+> 2026-08-13 深夜 R16 复盘体验优化（用户 6 项反馈 + 建议1情绪周期 + 建议4结算标注，3 子代理并行）：
+> 1. **去辩论节点**：graph.py 删 debate_node/_RULE_DEBATE/router，图改
+>    fetch→validate→news→analysts→host→report；host_node 注入 `host_analysis`（LLM 原文或规则降级），
+>    build_result 恒 debate_history=[] / round_count=0；报告「分歧与讨论」→「分歧点」（prompts MODE_INFO
+>    6 模式 + build_report_prompt + quality.py REVIEW_SECTIONS + test_quality_r10 样例已同步）。
+> 2. **成交额亿元**：build_report_prompt 单位铁律——成交额列 ÷1e8 转亿元（2 位小数），成交量原样。
+> 3. **买入带原因**：ANALYST_BASE_TEMPLATE/build_account_block/报告推荐格式三处冻结格式加 `，原因是XXX`；
+>    plan_extractor 正则本就兼容（finditer 非全匹配），新增 3 条带原因用例锁定。
+> 4. **深证成指加回**：stock_data.py INDEX_CODES 恢复 shenzhen=sz399001（sz 前缀通用判定，与创业板同路径），
+>    报告指数表改四指数、前端 DataTab 指数卡过滤加回。
+> 5. **去涨跌分布**：snapshot.py `_snap_breadth` 移除 9 档 distribution（保留 up/down/limit_up/limit_down/
+>    涨跌比）；前端删 BreadthChart（Charts.jsx 导出 + ReportView 图块）。
+> 6. **情绪周期定位**：market_extra.py 新增 `classify_emotion_cycle(blocks)->str`（四阶段：冰点≤20/退潮/主升/
+>    修复发酵，规则引擎纯计算）；graph.fetch_data_node 注入 state.emotion_cycle；报告市场概况加
+>    「情绪周期定位」行。实测 8-13 数据→「退潮（红盘率45.8%、炸板率39.2%）」。
+> 7. **前端其他**：ReportView 左侧菜单只显示「{date} 复盘」；stages.js/App/api/mock/normalize 删辩论；
+>    账户「结算至」标注（前端 .settle-note + normalize.current_date + 后端 _summary 补 current_date）。
+> 验证：三路子代理测试各绿（引擎 110 / 数据 83+55 / 前端自检）；后端已重启加载新代码。
+> ⚠️ **遗留（明日继续）**：全量 pytest 现 **2 failed**（tests/test_data_modes.py::test_mode_blocks_all_success
+>   [intraday_am] 与 [intraday_pm]，`degraded_flag is False` 断言失败），**隔离复跑必现（非 flaky）**；
+>   regression.py 因此 16/17（仅「全量 pytest」一项 FAIL，build/API/聊天/浏览器冒烟全绿）。
+>   排查方向：intraday_am/pm 与 noon 的唯一差异在 minute 块 end_time 用 `_mode_end_time`（依赖 _now() 当前
+>   时间，测试用固定 TODAY 日期，疑似时间相关降级），需先定位是 minute 还是 index_trend 块 degraded（在
+>   测试内打印各 block.degraded 即可）；与深证成指改动是否相关待确认。修复后重跑 regression.py 至 17/17。
+> ⏳ **下一批（用户已确认口径，待启动）**：首页 4 点——① 去掉「今日数据」个股行情查询卡（个股详情保留）；
+>   ② 去掉纳斯达克卡片；③ 市场天气增强敏感度（九档，每100家跌5%以上扣5分/跌7%以上扣10分，允许负数、
+>   下限-100，需数据层 finer 分档或「跌停」作 7%+ 代理）；④ 观察列表加 margin-top（与风格坐标粘连）。

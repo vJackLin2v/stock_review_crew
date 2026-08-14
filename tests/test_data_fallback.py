@@ -172,15 +172,23 @@ def test_sentiment_realtime(monkeypatch):
 
 
 def test_breadth_realtime(monkeypatch):
-    diff = [
-        {"f12": "600519", "f14": "贵州茅台", "f3": 1.2},
-        {"f12": "300750", "f14": "宁德时代", "f3": -0.5},
+    # 构造 >=3000 只以满足东财完整性守卫（total<3000 视为限流降级，2026-08-14 新增），
+    # 其中 1000 涨 / 1000 跌 / 1000 平 + 5 只边界样本（北证/ST 各 1 只被过滤、3 只有效）。
+    diff = []
+    for i in range(1000):
+        diff.append({"f12": f"60{i:04d}", "f14": f"沪股{i}", "f3": 1.0})
+        diff.append({"f12": f"00{i:04d}", "f14": f"深股{i}", "f3": -1.0})
+        diff.append({"f12": f"30{i:04d}", "f14": f"创业{i}", "f3": 0.0})
+    diff += [
         {"f12": "830799", "f14": "北证股", "f3": 2.0},   # 北证过滤
         {"f12": "600001", "f14": "ST测试", "f3": 3.0},   # ST 过滤
+        {"f12": "600519", "f14": "贵州茅台", "f3": 1.2},
+        {"f12": "300750", "f14": "宁德时代", "f3": -0.5},
         {"f12": "000001", "f14": "平安银行", "f3": 0.0},
     ]
     monkeypatch.setattr(realtime, "_http_json", lambda *a, **k: {"data": {"diff": diff}})
     b = realtime.fetch_breadth_realtime()
-    assert b["total"] == 3
-    assert b["up"] == 1 and b["down"] == 1 and b["flat"] == 1
+    assert b["total"] == 3003
+    assert b["up"] == 1001 and b["down"] == 1001 and b["flat"] == 1001
+    assert b["source"] == "东财实时"
     assert b["up_down_ratio"] == pytest.approx(1.0)

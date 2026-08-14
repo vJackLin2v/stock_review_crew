@@ -689,6 +689,8 @@ a { color: var(--accent); }
   gap: 16px;
   align-items: start;
   min-width: 0;
+  /* R17：观察列表与上方「风格坐标」卡片视觉分离 */
+  margin-top: 16px;
 }
 .home-cols > * { min-width: 0; }
 .home-grid > * { min-width: 0; }
@@ -1108,34 +1110,7 @@ a { color: var(--accent); }
 .a-suggestion-title { font-size: 12.5px; font-weight: 700; color: var(--success-dark); margin-bottom: 4px; }
 .a-suggestion .md { font-size: 13px; }
 
-.debate-block {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  overflow: hidden;
-  box-shadow: var(--shadow-sm);
-}
-.debate-block summary { padding: 14px 16px; cursor: pointer; font-weight: 600; font-size: 13.5px; list-style: none; }
-.debate-block summary::-webkit-details-marker { display: none; }
-.debate-block summary::after {
-  content: "▾";
-  margin-left: auto;
-  float: right;
-  color: var(--text-3);
-  transition: transform 0.2s ease;
-}
-.debate-block[open] summary::after { transform: rotate(180deg); }
-.debate-block summary:hover { background: var(--hover); }
-.debate-round-head {
-  padding: 10px 16px;
-  font-size: 12.5px;
-  font-weight: 700;
-  color: var(--accent-dark);
-  background: var(--accent-soft);
-  border-top: 1px solid var(--border-soft);
-}
-.debate-item { padding: 10px 16px; border-top: 1px solid var(--border-soft); font-size: 13px; line-height: 1.7; }
-.debate-speaker { font-weight: 700; color: var(--accent); }
+/* 改动4：.debate-block 系列样式已随辩论记录展示块一并移除 */
 
 .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .chart-block {
@@ -1648,43 +1623,8 @@ a { color: var(--accent); }
   flex-shrink: 0;
 }
 
-/* F6 纳斯达克 */
-.nasdaq-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 9px 0;
-  border-bottom: 1px dashed var(--border-soft);
-}
-.nasdaq-item:last-of-type { border-bottom: none; }
-.nasdaq-id { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.nasdaq-name { font-weight: 700; font-size: 13.5px; }
+/* F6 纳斯达克（已移除卡片；仅保留 .nasdaq-symbol 被额外指数代码复用） */
 .nasdaq-symbol { font-size: 11px; color: var(--text-2); font-weight: 400; }
-.nasdaq-quote { display: flex; align-items: baseline; gap: 10px; }
-.nasdaq-price { font-size: 17px; font-weight: 800; font-variant-numeric: tabular-nums; }
-.nasdaq-pct {
-  font-size: 12px;
-  font-weight: 700;
-  min-width: 74px;
-  text-align: right;
-  padding: 2px 9px;
-  border-radius: 99px;
-  font-variant-numeric: tabular-nums;
-}
-.nasdaq-pct.pos { background: rgba(224, 49, 49, 0.1); color: var(--up); }
-.nasdaq-pct.neg { background: rgba(12, 166, 120, 0.1); color: var(--down); }
-.nasdaq-pct.zero { background: var(--bg-soft); color: var(--text-3); }
-.nasdaq-badge {
-  font-size: 10px;
-  padding: 1px 7px;
-  border-radius: 10px;
-  background: var(--warn-bg);
-  color: var(--warn-text);
-  border: 1px solid var(--warn-border);
-  margin-left: 4px;
-  white-space: nowrap;
-}
 
 /* F5 板块温度榜：hot/cold 左右对照 */
 .sh-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -1766,7 +1706,7 @@ a { color: var(--accent); }
 .xi-strip .card-degrade { grid-column: 1 / -1; margin-top: 0; }
 
 /* F4 风格坐标 */
-.style-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.style-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .style-dim {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -2597,6 +2537,19 @@ html[data-font="xlarge"] body { font-size: 17px; }
   font-size: 15px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+}
+
+/* 改动6：模拟账户「结算至」醒目提示（账户概览区） */
+.settle-note {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.7;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  color: var(--accent-dark);
 }
 
 /* ---------- 数据表格（项目自绘） ----------

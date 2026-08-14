@@ -745,15 +745,20 @@ def settle_plans(rec_date: str, settle_date: str,
         code = str(p.get("code") or "").zfill(6)
         if code:
             codes.add(code)
-    # 分析师集合：显式传入 → 计划涉及 → 存量账户目录（无计划时也要推进存量账户）
-    sids = skill_ids or sorted({str(p.get("skill_id") or "unknown") for p in plans})
-    if not sids:
+    # 分析师集合：显式传入 → 计划涉及 ∪ 存量账户目录。无论 rec_date 有无计划，
+    # 都要推进所有存量账户（T+1 解冻 + 当日快照），否则仅部分分析师有新计划时，
+    # 其余持仓账户的 current_date 停滞、T+1 冻结不解除，跨日持仓状态失真。
+    plan_sids = {str(p.get("skill_id") or "unknown") for p in plans}
+    if skill_ids is not None:
+        sids = sorted(set(skill_ids))
+    else:
+        sids = set(plan_sids)
         try:
-            sids = sorted(
-                d.name for d in acct_storage.accounts_root().iterdir()
-                if d.is_dir() and (d / "account.json").exists())
+            sids |= {d.name for d in acct_storage.accounts_root().iterdir()
+                     if d.is_dir() and (d / "account.json").exists()}
         except OSError:
-            sids = []
+            pass
+        sids = sorted(sids)
     accounts: dict[str, dict] = {}
     for sid in sids:
         acct = acct_storage.load_account(sid)

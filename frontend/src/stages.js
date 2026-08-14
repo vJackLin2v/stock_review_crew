@@ -1,10 +1,10 @@
-// 复盘任务阶段（R15/R2：趋势派+情绪派合并为单一「分析师」阶段，2026-08-12 用户确认）
+// 复盘任务阶段（R15/R2：趋势派+情绪派合并为单一「分析师」阶段，2026-08-12 用户确认；
+// 2026-08-13：移除「辩论」阶段——后端不再 emit debate 阶段，其余阶段顺序不变）
 export const STAGES = [
   { key: "fetch", label: "取数" },
   { key: "news", label: "资讯" },
   { key: "analysts", label: "分析师" },
   { key: "host", label: "主持人" },
-  { key: "debate", label: "辩论" },
   { key: "report", label: "报告" },
   { key: "done", label: "完成" },
 ];
@@ -32,10 +32,9 @@ export function stageIndex(stage) {
   // R15/R2：趋势派/情绪派旧阶段事件统一映射到「分析师」（兼容旧 job 数据）
   if (s.includes("analyst") || s.includes("trend") || s.includes("sentiment")
       || s.includes("趋势") || s.includes("情绪")) return 2;
-  if (s.includes("host") || s.includes("moderator") || s.includes("主持")) return 4;
-  if (s.includes("debat") || s.includes("辩论")) return 5;
-  if (s.includes("report") || s.includes("报告")) return 6;
-  if (s.includes("done") || s.includes("finish") || s.includes("完成")) return 7;
+  if (s.includes("host") || s.includes("moderator") || s.includes("主持")) return 3;
+  if (s.includes("report") || s.includes("报告")) return 5;
+  if (s.includes("done") || s.includes("finish") || s.includes("完成")) return 6;
   return 0;
 }
 

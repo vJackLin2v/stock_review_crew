@@ -1,4 +1,4 @@
-"""I2 复盘引擎测试：6 模式取数分发、全流程降级、进度钩子、辩论上限、结果契约。"""
+"""I2 复盘引擎测试：6 模式取数分发、全流程降级、进度钩子、无辩论契约、结果契约。"""
 
 import sys
 import re
@@ -249,6 +249,27 @@ def test_news_empty_not_block(fetch_mode):
     assert "今日无重大资讯影响" in state["market_data"]
 
 
+def test_fetch_emotion_cycle_injected(fetch_mode, monkeypatch):
+    """R16：fetch_data_node 注入情绪周期定位——数据层返回值（blocks dict 入参）直通 state；
+    数据层异常/未落地 → 兜底「数据不足」，绝不阻塞复盘。"""
+    fetch_mode(lambda mode, date: _fake_data())
+    calls = []
+    monkeypatch.setattr(
+        "stock_review_crew.tools.market_extra.classify_emotion_cycle",
+        lambda blocks: calls.append(blocks) or "主升（红盘率65%、涨停60家）")
+    state = _invoke(mode="close")
+    assert state["emotion_cycle"] == "主升（红盘率65%、涨停60家）"
+    assert calls and isinstance(calls[0], dict), "传入的应为 blocks dict"
+
+    def boom(blocks):
+        raise RuntimeError("数据层情绪周期异常")
+
+    monkeypatch.setattr(
+        "stock_review_crew.tools.market_extra.classify_emotion_cycle", boom)
+    state2 = _invoke(mode="close")
+    assert state2["emotion_cycle"] == "数据不足"
+
+
 def test_news_rule_extraction_marks_degraded(monkeypatch):
     """资讯分析 LLM 失败 → 规则提取 + 降级标注（资讯节点保留的降级路径）。"""
     monkeypatch.setattr(graph, "_llm_ready", lambda: True)
@@ -272,7 +293,7 @@ def test_news_rule_extraction_marks_degraded(monkeypatch):
 # ── 全流程（无 Key 规则引擎降级）──
 
 def test_full_flow_with_mock_llm(fetch_mode):
-    """全流程（LLM mock 可用）：分析/辩论/报告节点均走 LLM 路径，数据无降级。"""
+    """全流程（LLM mock 可用）：分析/主持人/报告节点均走 LLM 路径，数据无降级。"""
     fetch_mode(lambda mode, date: _fake_data())
     state = _invoke()
     assert len(state["analyses"]) == 5
@@ -283,7 +304,11 @@ def test_full_flow_with_mock_llm(fetch_mode):
     assert not state["degraded_notes"]
     assert "仅供参考，不构成投资建议" in state["final_report"]
     assert any("无昨日报告，跳过验证" in a["analysis"] for a in state["analyses"])
-    assert len(state["debate_history"]) <= 3
+    # R16：辩论节点已移除——debate_history 恒空；主持人分歧判断写入 host_analysis
+    assert state["debate_history"] == []
+    assert "分歧判断" in state["host_analysis"]
+    # R16：情绪周期定位注入（数据层已落地 → 周期标签字符串；异常/未落地 → 「数据不足」）
+    assert isinstance(state["emotion_cycle"], str) and state["emotion_cycle"]
 
 
 def test_yesterday_missing_vs_present(fetch_mode):
@@ -297,13 +322,35 @@ def test_yesterday_missing_vs_present(fetch_mode):
     assert "仅供参考，不构成投资建议" in present["final_report"]
 
 
-def test_debate_loop_respects_max_rounds(fetch_mode):
+def test_no_debate_rounds_always_empty(fetch_mode):
+    """R16：辩论节点已移除——无论 max_rounds 如何，debate_history 恒空、
+    主持人只执行一次（round_count 恒 1），不再有辩论轮次。"""
     fetch_mode(lambda mode, date: _fake_data())
     state = _invoke(max_rounds=1)
-    assert len(state["debate_history"]) <= 1
+    assert state["debate_history"] == []
     state3 = _invoke(max_rounds=3)
-    assert len(state3["debate_history"]) <= 3
-    assert state3["round_count"] <= 4
+    assert state3["debate_history"] == []
+    assert state3["round_count"] == 1
+
+
+def test_host_rule_fallback_analysis(monkeypatch):
+    """R16：主持人 LLM 失败 → 规则降级生成 host_analysis（分歧判断：有/无 + 讨论议题格式），
+    字段名与注入位置不回归。"""
+    monkeypatch.setattr(graph, "_llm_ready", lambda: True)
+
+    def boom(llm, messages, timeout=150.0):
+        raise RuntimeError("mock LLM 主持人失败")
+
+    monkeypatch.setattr(graph, "_invoke_llm", boom)
+    out = graph.host_node({
+        "analyses": [], "snapshot": {}, "round_count": 0, "max_rounds": 3,
+        "degraded": False, "degraded_notes": [],
+    })
+    assert out["host_analysis"].startswith("分歧判断：")
+    assert "讨论议题：" in out["host_analysis"]
+    assert "降级模式" in out["host_analysis"]
+    assert out["degraded"] is True
+    assert out["discussion_done"] is True  # 无分歧 → 直接进入报告
 
 
 def test_no_fake_debate_without_stance_conflict(fetch_mode, monkeypatch):
@@ -316,10 +363,9 @@ def test_no_fake_debate_without_stance_conflict(fetch_mode, monkeypatch):
     assert state["debate_history"] == []
 
 
-def test_debate_at_most_one_round(fetch_mode, monkeypatch):
-    """主持人判定有分歧 → 辩论 1 轮后收敛（确定性 mock：第二轮判定无分歧），
-    各分析师回复互不相同。"""
-    """主持人判定有分歧 → 辩论 1 轮后收敛（第二轮判定无分歧），各分析师回复互不相同。"""
+def test_host_analysis_records_disagreement_no_debate(fetch_mode, monkeypatch):
+    """R16：主持人判定有分歧 → host_analysis 记录分歧判断（LLM 原文），
+    但不再触发辩论——debate_history 恒空、无逐轮转写。"""
     data = {
         "date": "2026-08-03",
         "index": {
@@ -345,11 +391,9 @@ def test_debate_at_most_one_round(fetch_mode, monkeypatch):
         graph, "_llm_pair",
         lambda: (_FakeLLM(_one_round_factory), _FakeLLM(_one_round_factory)))
     state = _invoke(max_rounds=3)
-    assert len(state["debate_history"]) == 1
-    assert "多空方向分歧" in state["debate_history"][0]["topic"]
-    responses = [r["response"] for r in state["debate_history"][0]["responses"]]
-    assert responses
-    assert len(set(responses)) == len(responses)
+    assert state["debate_history"] == []
+    assert "分歧判断：有" in state["host_analysis"]
+    assert "多空方向分歧" in state["host_analysis"]
 
 
 def test_progress_stages_monotonic(fetch_mode, monkeypatch):
@@ -365,9 +409,8 @@ def test_progress_stages_monotonic(fetch_mode, monkeypatch):
     assert stages[0] == "fetch"
     for required in ("news", "analysts", "host", "report", "done"):
         assert required in stages
-    # P1-C：降级模式按立场判分歧，无多空对立时跳过辩论；有辩论也仅 1 轮
-    if "debate" in stages:
-        assert stages.index("report") > stages.index("debate")
+    # R16：辩论节点已移除——阶段序列无 debate，host 后直接 report
+    assert "debate" not in stages
     assert stages[-1] == "done"
 
     pcts = [e[1] for e in events]
@@ -474,8 +517,9 @@ def test_llm_path_mocked(fetch_mode, monkeypatch):
     assert state["final_report"].startswith("# 2026-08-03 A股收盘复盘报告")
     assert "仅供参考，不构成投资建议" in state["final_report"]
     assert state["overall_tags"] == ["测试标签A", "测试标签B"]
-    assert len(state["debate_history"]) == 1
-    assert state["debate_history"][0]["topic"] == "多空方向分歧"
+    # R16：无辩论——主持人分歧判断进 host_analysis，debate_history 恒空
+    assert state["debate_history"] == []
+    assert "多空方向分歧" in state["host_analysis"]
 
 
 # ── 结果契约（§五 result.report）与免责声明 ──
@@ -496,7 +540,9 @@ def test_build_result_structure():
     assert result["disclaimer"] == "仅供参考，不构成投资建议"
     assert result["final_report"].endswith("> 仅供参考，不构成投资建议")
     assert result["degraded"] is True
-    assert result["round_count"] == 2
+    # R16：无辩论——debate_history 恒空、round_count 恒 0（即使 state 里有旧值）
+    assert result["round_count"] == 0
+    assert result["debate_history"] == []
 
 
 def test_disclaimer_forced_and_idempotent():
@@ -514,9 +560,10 @@ def test_default_initial_state_full():
     assert s["yesterday_report"] == ""
     assert s["earlier_today"] == ""
     for key in (
-        "market_data", "raw_news", "snapshot", "analyses", "discussion_topic",
-        "discussion_done", "round_count", "debate_history", "final_report",
-        "overall_tags", "disclaimer", "degraded", "degraded_notes",
+        "market_data", "raw_news", "snapshot", "emotion_cycle", "analyses",
+        "discussion_topic", "discussion_done", "round_count", "host_analysis",
+        "debate_history", "final_report", "overall_tags", "disclaimer",
+        "degraded", "degraded_notes",
     ):
         assert key in s
 
