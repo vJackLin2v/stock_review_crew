@@ -766,3 +766,29 @@
   （000620/001269/600446）frozen=0（已解冻）、7-03 买入（000536）frozen=2400（冻结）。
   另修 `test_breadth_realtime`：R16 加「total>=3000 完整性守卫」后旧 mock 仅 3 只触发
   降级，改 mock 3000 只+边界样本。全量 733 passed / 52 skipped。
+
+### [2026-08-14] 批跑「不允许跳过」：fail-fast + 增强重试 + py_mini_racer 修复 + 东财限流
+- 现象：晚间（20:37 起）跑 7-29~8-14 逐日批跑，出现「单日失败被静默跳过」——7-29
+  `LLM 降级`、7-30/8-06/8-07 `index_trend 数据缺失`，批跑脚本原设计「单日失败不中断
+  批次」继续跑后续日期，导致数据链断裂（7-30 缺失但 7-31/8-03 已生成）。
+- 根因（三连环，外部服务晚间抖动 + 一个环境坑）：
+  1. **`.venv` py_mini_racer 缺 `__init__.py`**（`site-packages/py_mini_racer/` 里只有
+     `_mini_racer.py` 等，无 `__init__.py`）→ `from py_mini_racer import MiniRacer` 报
+     `cannot import name ... unknown location` → `import akshare` 整体失败 → 指数主源
+     `stock_zh_index_daily_tx` 不可用。7-29 能成功是「当时」靠东财备用源；东财被限流后
+     主源+备用源全挂 → `index_trend 数据缺失`。**修复**：手动补 `__init__.py`
+     （`from ._mini_racer import MiniRacer`），.venv 无 pip 无法重装。（.venv 文件不入
+     git，换环境需重建。）
+  2. **东财数据源限流**（备用源）：直连 `push2his/push2.eastmoney.com` 均
+     `RemoteDisconnected`，走代理 502。主源（腾讯指数）恢复后不再依赖东财。
+  3. **外部服务间歇抖动**：腾讯指数（14-18s，偶发 >30s 超时）+ opencode LLM（150s 超时）
+     晚间时好时坏，3s 间隔 × 3 次重试不足以跨越抖动窗口。
+- 修复（`work/review_batch.py`）：
+  1. **fail-fast**：`cmd_run` 单日失败立即 `return 1` 中止批次，绝不静默跳过后续日期
+     （重跑前需先 `settle_plans` 逐日重建账户到上一个 done 日期，因 settle 已把账户推进
+     到失败日期）。
+  2. **增强重试**：`MAX_ATTEMPTS` 3→5、`RETRY_SLEEP` 3s→45s，跨越抖动窗口。
+- 备注/复现：修复后 8-06~8-14 共 7 天全部成功（exit 0），8-07/8-11/8-12/8-14 靠 45s
+  重试跨越抖动；7-01~8-14 共 33 个交易日逐日交错撮合跑通，总成交 135 / 拒绝 97 /
+  行情缺失 0。教训：**批跑绝不能「单日失败静默跳过」**；外部服务抖动要 fail-fast +
+  拉长重试间隔，而不是靠事后补跑。

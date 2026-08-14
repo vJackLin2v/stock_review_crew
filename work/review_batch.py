@@ -48,7 +48,8 @@ EXCLUDED_SKILLS = ("host", "review_assistant")
 # meta.degraded 中命中即判 LLM 降级的关键词（graph.py 降级标注口径）
 LLM_DEGRADED_MARKERS = ("LLM 不可用", "LLM 失败", "降级为规则")
 
-MAX_ATTEMPTS = 3          # 单日最多尝试次数（含首次）
+MAX_ATTEMPTS = 5          # 单日最多尝试次数（含首次）；外部服务（东财/腾讯/LLM）晚间间歇抖动，5 次更稳
+RETRY_SLEEP = 45          # 失败重试间隔（秒）；拉长以跨越数据源/LLM 的抖动窗口（2026-08-14）
 POLL_INTERVAL = 5         # 轮询间隔（秒）
 JOB_TIMEOUT = 1200        # 单任务轮询超时（秒）
 REQUEST_TIMEOUT = 30      # 单次 HTTP 请求超时（秒）
@@ -431,8 +432,8 @@ def run_one_date(sess: requests.Session, d: date, force: bool,
             mark_error(state, date_str, attempt, note)
             print(f"[run] {date_str} 跳过：{note}")
             return False
-        print(f"[run] {date_str} 第 {attempt} 次失败：{note}，稍后重试…")
-        time.sleep(3)
+        print(f"[run] {date_str} 第 {attempt} 次失败：{note}，{RETRY_SLEEP}s 后重试…")
+        time.sleep(RETRY_SLEEP)
     mark_error(state, date_str, MAX_ATTEMPTS, last_note)
     print(f"[run] {date_str} 失败（重试 {MAX_ATTEMPTS} 次后仍失败）：{last_note}")
     return False
@@ -473,7 +474,6 @@ def cmd_run(start: Optional[date], end: Optional[date],
 
     state = load_state()
     sess = _session()
-    failed: list[str] = []
     prev_date: Optional[str] = None
     for d in days:
         date_str = d.isoformat()
@@ -487,14 +487,16 @@ def cmd_run(start: Optional[date], end: Optional[date],
         if prev_date is not None:
             settle_prev_day(prev_date, date_str)
         if not run_one_date(sess, d, force, max_rounds, state):
-            failed.append(date_str)
+            # 2026-08-14 fail-fast：单日失败立即中止，绝不静默跳过后续日期。
+            # 外部服务（东财数据源 / opencode LLM）抖动时会连续失败，若继续跑
+            # 会跳过造成数据链断裂。中止时账户已 settle 推进到 date_str（前一日
+            # 计划已撮合）；重跑前需先重建账户到上一个 done 日期，再断点续跑。
+            print(f"\n[run] {date_str} 失败（重试 {MAX_ATTEMPTS} 次后仍失败），"
+                  f"立即中止批次（fail-fast，绝不跳过后续日期）。")
+            print("请排查/等服务恢复后：先重建账户到上一个成功日期，再重跑本命令断点续跑。")
+            return 1
         prev_date = date_str
 
-    if failed:
-        print(f"\n[run] 完成：{len(days) - len(failed)} 成功/跳过，"
-              f"{len(failed)} 失败：{'、'.join(failed)}")
-        print("单日失败不中断批次；重跑会按状态文件仅补失败日期（--force 全覆盖）。")
-        return 1
     print(f"\n[run] 全部完成：{len(days)} 天。仅供参考，不构成投资建议。")
     return 0
 
