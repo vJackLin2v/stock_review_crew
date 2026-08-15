@@ -280,6 +280,84 @@ def test_mode_mismatch_cache_skips_replay(monkeypatch):
 
 # ── 7. 预热脚本：日期发现 + 落盘（mock 取数，避免真实网络） ──
 
+# ── 8. 追加需求（2026-08-16）：取数校验错误消息区分「实时失败」vs「离线回放快照缺失」 ──
+
+def _bad_index_trend_blocks():
+    """一次性快照：index_trend 被降级为 source=数据缺失（历史取数超时遗留的坏快照）。"""
+    blocks = _close_blocks()
+    blocks["index_trend"] = {"source": "数据缺失", "degraded": True}
+    return blocks
+
+
+def _bad_payload(date="2026-08-16", mode="close"):
+    """坏快照的落盘 payload（blocks 里 index_trend 数据缺失，mode=close）。"""
+    return {
+        "date": date,
+        "mode": mode,
+        "mode_label": "收盘复盘",
+        "blocks": _bad_index_trend_blocks(),
+        "market_data": "坏快照缓存文本",
+        "market_weather": "晴",
+        "emotion_cycle": "主升",
+        "raw_news": "",
+        "degraded_notes": [graph._OFFLINE_NOTE],
+        "source": "fetch_mode_data",
+        "saved_at": "2026-08-16T15:00:00",
+    }
+
+
+def test_replay_bad_snapshot_validation_msg_distinguishes_offline(monkeypatch):
+    """B1：回放命中坏快照（index_trend source=数据缺失）→ validate_data_node 抛
+    DataValidationError，且消息区分来源——含「离线回放快照」与「market_data.json」，
+    明确提示是历史遗留、可删快照强制实时重取，而非误导向「查网络/代理」。"""
+    d = "2026-08-16"
+    reviews.save_market_data(d, _bad_payload(date=d, mode="close"))
+    # 无 REVIEW_FORCE_FETCH、state 无 force_fetch → 走离线回放路径（不实时取数）
+    out = graph.fetch_data_node(_state(date=d, mode="close"))
+    assert out["snapshot"]["source"] == "离线回放", "坏快照应命中离线回放路径"
+
+    state = _state(date=d, mode="close", snapshot=out["snapshot"])
+    with pytest.raises(graph.DataValidationError) as ei:
+        graph.validate_data_node(state)
+    msg = str(ei.value)
+    assert "离线回放快照" in msg, f"回放缺失消息应含『离线回放快照』，实际：{msg}"
+    assert "market_data.json" in msg, f"回放缺失消息应含 market_data.json 指引删除重取，实际：{msg}"
+    assert "全部数据源不可用" not in msg, f"回放缺失不应误指实时所有源不可用：{msg}"
+
+
+def test_real_fetch_missing_validation_msg_keeps_live_wording(monkeypatch):
+    """B2：实时取数路径缺失核心块 → validate_data_node 抛错但消息不变——
+    仍含「全部数据源不可用」，且**不含**「离线回放快照」（原实时消息不被污染）。"""
+    d = "2026-08-17"
+    # 无快照（该日期无 market_data.json）→ 走实时取数路径；注入 fetcher 返回坏 blocks
+    def fetcher(mode, date):
+        return {"date": date, "mode": mode, "mode_label": "收盘复盘",
+                "blocks": _bad_index_trend_blocks(), "degraded": [], "degraded_flag": False}
+
+    monkeypatch.setattr(graph, "_load_pure_fetcher", lambda: fetcher)
+    out = graph.fetch_data_node(_state(date=d, mode="close"))
+    assert out["snapshot"]["source"] == "fetch_mode_data", "无快照应命中实时取数路径"
+
+    state = _state(date=d, mode="close", snapshot=out["snapshot"])
+    with pytest.raises(graph.DataValidationError) as ei:
+        graph.validate_data_node(state)
+    msg = str(ei.value)
+    assert "全部数据源不可用" in msg, f"实时缺失消息应保留『全部数据源不可用』，实际：{msg}"
+    assert "离线回放快照" not in msg, f"实时缺失消息不应含离线回放字样（原消息不变）：{msg}"
+
+
+def test_replay_good_snapshot_passes_validation(monkeypatch):
+    """B3（坏快照对照组）：index_trend 完整的好快照 → 回放 → validate_data_node
+    不抛错（返回 {}），确保按 source 区分消息的实现不引入快照可用性回归。"""
+    d = "2026-08-18"
+    reviews.save_market_data(d, _make_payload(date=d, mode="close"))
+    out = graph.fetch_data_node(_state(date=d, mode="close"))
+    assert out["snapshot"]["source"] == "离线回放"
+    state = _state(date=d, mode="close", snapshot=out["snapshot"])
+    # 好快照核心块完整 → 校验通过，无 DataValidationError
+    assert graph.validate_data_node(state) == {}
+
+
 def test_preheat_script_discovers_and_saves(monkeypatch):
     import scripts.preheat_reviews as preheat  # noqa: E402
 

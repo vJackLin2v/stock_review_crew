@@ -746,6 +746,15 @@ def validate_data_node(state):
                if name in blocks and not _block_usable(blocks.get(name))]
     if missing:
         names = "、".join(missing)
+        # 2026-08-16：区分「实时取数失败」vs「离线回放快照缺失」——
+        # 快照中数据缺失可能是历史失败运行把该块降级为「数据缺失」后覆盖保存的坏快照，
+        # 离线回放照抄缺失块，并非本次实时取数失败；但快照缺失仍是真缺失，保留终止语义。
+        if isinstance(snapshot, dict) and snapshot.get("source") == "离线回放":
+            date = state.get("date") or ""
+            raise DataValidationError(
+                f"取数校验失败：{names}数据缺失（离线回放快照中该块缺失，属历史取数失败遗留，非本次实时取数问题）。"
+                f"可删除 data/reviews/{date}/market_data.json 后强制实时重取。"
+            )
         raise DataValidationError(
             "取数校验失败：" + names + "数据缺失（全部数据源不可用），本次复盘终止。请检查网络/代理/数据源后重试。"
         )
