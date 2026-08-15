@@ -413,6 +413,22 @@ def _first_open_day_index(bt: dict) -> int:
     return 0
 
 
+def _reset_accounts() -> None:
+    """回测前重置模拟账户：清空数据根下 accounts/（回到 10 万初始资金）。
+    方案 A（用户确认）：每次回测从 10 万重头跑所选区间，不叠加区间之前的历史持仓。"""
+    import shutil
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "src"))
+    from stock_review_crew.accounts.storage import accounts_root
+
+    root = accounts_root()
+    if root.is_dir():
+        for d in root.iterdir():
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=True)
+
+
 def start_backtest(params: dict) -> str:
     """启动一次回测：单 running 互斥 + 落盘 + 后台线程逐日。返回 backtest_id。"""
     start = _validate_date(params.get("start"))
@@ -436,6 +452,9 @@ def start_backtest(params: dict) -> str:
         for bt in BACKTESTS.values():
             if bt.get("status") in ("queued", "running"):
                 raise HTTPException(status_code=409, detail="已有回测在进行中，请先等待其完成或被取消")
+
+    # 方案 A：回测前强制重置模拟账户（每次从 10 万初始资金重跑所选区间，不叠加历史持仓）
+    _reset_accounts()
 
     clean = {
         "start": start,

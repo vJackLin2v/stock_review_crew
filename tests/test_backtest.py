@@ -487,3 +487,25 @@ def test_run_review_day_direct_returns_timing(fake_fetch):
         assert v.get("elapsed_ms") is not None and v["elapsed_ms"] >= 0
         assert v.get("name")
         assert v.get("skill_id") == sid  # 值内嵌 skill_id，供 backtest _fill_analyst_gauge 排序
+
+
+# ═══════════════════════════════════════════════════════════════
+# 七、账户重置（方案 A）：回测前清空 data/accounts/（回到 10 万）
+# ═══════════════════════════════════════════════════════════════
+
+def test_start_backtest_resets_accounts(monkeypatch):
+    monkeypatch.setattr(btest, "_settle_impl", _fake_settle)
+    monkeypatch.setattr(btest, "_run_review_day_impl", make_fake_day()[0])
+
+    from stock_review_crew.accounts.storage import accounts_root
+
+    root = accounts_root()
+    (root / "alang").mkdir(parents=True, exist_ok=True)
+    (root / "alang" / "account.json").write_text("{}", encoding="utf-8")
+    assert (root / "alang").is_dir()
+
+    bt_id = _start("2026-08-10", "2026-08-10")
+    _wait_backtest(bt_id)
+
+    # 回测启动已清空 accounts/（重置到 10 万初始资金）
+    assert not (root / "alang").exists()
