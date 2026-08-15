@@ -137,6 +137,8 @@ def place_order(
     position_cheng: float,
     day: dict,
     qty: Optional[int] = None,
+    *,
+    conditional: Optional[dict] = None,
 ) -> TradeResult:
     """下单（口径用户已确认）：
     - 目标价 ≥ 涨停价 → 拒买（涨停买不进）；目标价 ≤ 跌停价 → 拒卖；
@@ -147,6 +149,9 @@ def place_order(
     - 费用：佣金 万2.5 最低 5 元、过户费 0.001% 双向、印花税 卖出 0.05%；
     - 拒绝也完整记录（合规审计）。绝不抛异常。
     day = {date, pre_close, high, low, close}（当日行情；缺失 → 拒「行情数据不足」）。
+    conditional：买入可选条件单字段 {stop_loss, take_profit, max_hold_days}，
+    成交时挂到持仓（供 check_conditional_orders 每日机械执行）；
+    缺省/为 None → 引擎不挂（调用方负责按默认 0.95/1.10/13 传入）。
     """
     try:
         date = str(day.get("date") or "")
@@ -227,18 +232,31 @@ def place_order(
                     f"（最小单位 {min_buy_unit(code)} 股起，无法再递减）",
                 )
             acct["cash"] = round(acct["cash"] - total, 6)
+            cond = conditional or {}
+            cond_fields = {
+                "stop_loss": cond.get("stop_loss"),
+                "take_profit": cond.get("take_profit"),
+                "max_hold_days": cond.get("max_hold_days"),
+                "buy_date": date,
+                "hold_days": 1,  # 买入日=第 1 天；后续结算日由 check_conditional_orders 递增
+                "hold_check_date": date,
+            }
             if pos is None:
                 positions[code] = {
                     "name": str(name or code),
                     "qty": qty,
                     "frozen_qty": qty,  # T+1：当日买入冻结
                     "avg_cost": round(amount / qty, 6),
+                    **cond_fields,
                 }
             else:
                 old_cost = pos["avg_cost"] * pos["qty"]
                 pos["qty"] += qty
                 pos["frozen_qty"] = pos.get("frozen_qty", 0) + qty
                 pos["avg_cost"] = round((old_cost + amount) / pos["qty"], 6)
+                # 条件单字段以本次买入计划为准（追加/覆盖绑定）
+                for k in ("stop_loss", "take_profit", "max_hold_days"):
+                    pos[k] = cond_fields.get(k)
             trade = {
                 "date": date, "code": code, "name": positions[code]["name"],
                 "side": "buy", "target_price": target, "qty": qty,
@@ -295,6 +313,160 @@ def place_order(
         return TradeResult(True, "", trade)
     except Exception as exc:  # noqa: BLE001 - 引擎绝不抛异常
         return TradeResult(False, f"下单处理异常：{exc}")
+
+
+DEFAULT_STOP_LOSS_RATE = 0.95
+DEFAULT_TAKE_PROFIT_RATE = 1.10
+DEFAULT_MAX_HOLD_DAYS = 13
+
+
+def apply_conditional_defaults(conditional: Optional[dict], buy_price: float) -> dict:
+    """买入计划三字段缺省（requirements-trading-v1 §三.1）：None 字段按
+    买入价×0.95 / 买入价×1.10 / 13 补齐。返回 {stop_loss, take_profit, max_hold_days}。"""
+    c = conditional or {}
+    return {
+        "stop_loss": float(c.get("stop_loss")) if c.get("stop_loss") is not None
+        else round(buy_price * DEFAULT_STOP_LOSS_RATE, 6),
+        "take_profit": float(c.get("take_profit")) if c.get("take_profit") is not None
+        else round(buy_price * DEFAULT_TAKE_PROFIT_RATE, 6),
+        "max_hold_days": int(c.get("max_hold_days")) if c.get("max_hold_days") is not None
+        else DEFAULT_MAX_HOLD_DAYS,
+    }
+
+
+def _one_word_limit_down(quote: dict, code: str) -> bool:
+    """一字跌停判定：当日开盘=最低=最高=收盘=跌停价（开板前无法成交）。
+    open 缺失（源拿不到）时退化为 低=高=收盘=跌停价（一字封死签名；
+    跳空判断按不跳空处理，但封死仍能识别）；绝不抛异常。"""
+    try:
+        high = float(quote.get("high"))
+        low = float(quote.get("low"))
+        close = float(quote.get("close"))
+        pre_close = quote.get("pre_close")
+        if pre_close is None:
+            return False
+        pct = _limit_pct(code)
+        if pct is None:
+            return False
+        limit_up, limit_down = limit_prices(float(pre_close), pct)
+        equal_sealed = (abs(low - close) < 1e-6 and abs(close - high) < 1e-6
+                        and abs(close - limit_down) < 1e-6)
+        if not equal_sealed:
+            return False
+        open_ = quote.get("open")
+        if open_ is not None:
+            return abs(float(open_) - close) < 1e-6
+        return True  # open 缺失：低=高=收盘=跌停价已是封死签名
+    except Exception:  # noqa: BLE001 - 绝不抛异常
+        return False
+
+
+def _conditional_sell_record(acct: dict, pos: dict, code: str, price: float,
+                             qty: int, day: dict, *, reason: str = "") -> dict:
+    """条件单卖出落账（与 place_order 卖出相同费用/realized 口径，R12 一致）：
+    佣金 万2.5 最低 5、过户费 0.001% 双向、印花税 卖出 0.05%；
+    realized = (成交价−avg_cost)×数量−费用；更新 cash/positions/realized_pnl；
+    写入 acct["trades"] 并返回 trade 记录。"""
+    amount = round(price * qty, 6)
+    fee = _commission(amount)
+    stamp = _stamp_tax(amount)
+    tf = _transfer_fee(amount)
+    realized = round((price - pos["avg_cost"]) * qty - fee - stamp - tf, 6)
+    acct["cash"] = round(acct["cash"] + amount - fee - stamp - tf, 6)
+    pos["qty"] -= qty
+    pos["frozen_qty"] = max(0, pos.get("frozen_qty", 0))
+    acct["realized_pnl"] = round(acct.get("realized_pnl", 0.0) + realized, 6)
+    if pos.get("qty", 0) <= 0:
+        acct["positions"].pop(code, None)
+    trade = {
+        "date": str(day.get("date") or ""), "code": str(code),
+        "name": str(pos.get("name") or code), "side": "sell",
+        "target_price": float(price), "qty": qty, "price": float(price),
+        "amount": amount, "fee": fee, "stamp_tax": stamp, "transfer_fee": tf,
+        "status": "成交", "reject_reason": "",
+        "cash_after": round(acct["cash"], 6),
+        "realized": realized,
+        "balance_after": round(acct["cash"], 6),
+        "condition": str(reason) if reason else "conditional_order",
+    }
+    acct.setdefault("trades", []).append(trade)
+    return trade
+
+
+def check_conditional_orders(acct: dict, day: dict, quotes: dict) -> list[dict]:
+    """每日条件单机械卖出（requirements-trading-v1 §二.5，B 层引擎核心）：
+
+    对 ``acct["positions"]`` 中**非当日买入**（buy_date < day）的每只持仓，
+    按顺序执行：①一字跌停顺延 → ②止损 → ③止盈 → ④超时卖出（收盘价）。
+
+    - ① 一字跌停（开板前无法成交）→ 不卖，顺延到下个交易日；
+    - ② 止损：day.low < stop_loss → 卖，成交价 = min(open, stop_loss)
+      （open 缺失 → stop_loss）；跳空低开打穿按开盘价成交；
+    - ③ 止盈：day.high >= take_profit → 卖，成交价 = max(open, take_profit)
+      （open 缺失 → take_profit）；跳空高开按开盘价成交；
+    - ④ 超时：持有天数（买入日=第 1 天，沿结算日序列累计）>= max_hold_days
+      且当日未止损止盈 → 收盘价卖出。
+
+    卖出走 place_order 卖出同样的费用/realized 口径，生成 status=「成交」trade
+    记录（含 date/price/qty/amount/fee/stamp_tax/transfer_fee/cash_after/realized），
+    并更新 acct["cash"]/positions/realized_pnl。流程调用方需保证已对 day 执行
+    _settle_day（T+1 解冻），否则当日买入持仓被误判。绝不抛异常。
+
+    quotes = {code: {pre_close, open, high, low, close}}。返回当日新增 trade 列表。
+    """
+    trades: list[dict] = []
+    try:
+        day_date = str(day.get("date") or "")
+        # 确定性顺序：code 排序，保证同输入同输出；遍历键快照，卖出后跳过
+        for code in sorted(acct.get("positions") or {}):
+            pos_cur = acct["positions"].get(code)
+            if pos_cur is None:
+                continue
+            buy_date = str(pos_cur.get("buy_date") or "")
+            if not buy_date or not (buy_date < day_date):
+                continue  # 仅对非当日买入持仓检查
+            qty = int(pos_cur.get("qty") or 0)
+            if qty <= 0:
+                continue
+            stop_loss = pos_cur.get("stop_loss")
+            take_profit = pos_cur.get("take_profit")
+            max_hold_days = int(pos_cur.get("max_hold_days") or 0)
+            if stop_loss is None or take_profit is None or max_hold_days <= 0:
+                continue  # 老持仓无条件单字段（未绑定）→ 不机械卖出
+            quote = quotes.get(code)
+            if quote is None:
+                continue  # 行情缺失 → 无法检查，顺延（绝不静默卖出）
+            open_ = quote.get("open")
+
+            # ① 一字跌停 → 顺延到下个交易日（不推进持有天数，仍算持有）
+            if _one_word_limit_down(quote, code):
+                continue
+
+            # 持有天数累计（买入日=第 1 天，沿结算日序列逐日递增，一天只 +1）：
+            # 依赖 pos.hold_days 持久计数器 + hold_check_date 防止同日重复递增
+            if str(pos_cur.get("hold_check_date") or "") != day_date:
+                pos_cur["hold_check_date"] = day_date
+                pos_cur["hold_days"] = int(pos_cur.get("hold_days") or 1) + 1
+            hold_days = int(pos_cur.get("hold_days") or 1)
+
+            # ② 止损：盘中最低 < 止损价
+            if float(quote["low"]) < float(stop_loss):
+                price = min(open_, float(stop_loss)) if open_ is not None else float(stop_loss)
+                trades.append(_conditional_sell_record(
+                    acct, acct["positions"][code], code, price, qty, day, reason="stop_loss"))
+            # ③ 止盈：盘中最高 >= 止盈价（未止损时）
+            elif float(quote["high"]) >= float(take_profit):
+                price = max(open_, float(take_profit)) if open_ is not None else float(take_profit)
+                trades.append(_conditional_sell_record(
+                    acct, acct["positions"][code], code, price, qty, day, reason="take_profit"))
+            # ④ 超时：持有天数 >= max_hold_days → 收盘价卖出
+            elif max_hold_days <= hold_days:
+                price = float(quote["close"])
+                trades.append(_conditional_sell_record(
+                    acct, acct["positions"][code], code, price, qty, day, reason="timeout"))
+    except Exception:  # noqa: BLE001 - 引擎绝不抛异常
+        pass
+    return trades
 
 
 def snapshot(acct: dict, date: str, close_prices: dict) -> dict:

@@ -569,6 +569,13 @@ def run_replay(start: Optional[str] = None, end: Optional[str] = None,
         quotes = payload.get("quotes") or {}
         degraded = list(payload.get("degraded") or [])
 
+        # 每结算日：先推进 T+1（解冻昨日买入）→ 对存量非当日买入持仓跑条件单机械卖出
+        # （requirements-trading-v1 §二.5）→ 再匹配新计划（当日买入不受条件单管束）。
+        # 条件单卖出现金/持仓变化在先，随后的快照与合规断言可正确反映。
+        for sid in skill_ids:
+            acct_engine._settle_day(accounts[sid], day)
+            acct_engine.check_conditional_orders(accounts[sid], {"date": day}, quotes)
+
         for p in day_plans:
             plan = p["plan"]
             code = str(plan.get("code") or "").zfill(6)
@@ -599,13 +606,26 @@ def run_replay(start: Optional[str] = None, end: Optional[str] = None,
             except (TypeError, ValueError):
                 qty = 0
             acct = accounts[str(plan.get("skill_id") or "unknown")]
+            # 买入计划条件单三字段缺省 → 引擎默认（§三）
+            conditional = None
+            if side == "buy" and target > 0:
+                conditional = acct_engine.apply_conditional_defaults(
+                    {
+                        "stop_loss": plan.get("stop_loss"),
+                        "take_profit": plan.get("take_profit"),
+                        "max_hold_days": plan.get("max_hold_days"),
+                    },
+                    target,
+                )
             if qty > 0:
                 # 计划显式给出股数（qty）时优先于仓位成数折算（A4 契约）
                 result = acct_engine.place_order(
-                    acct, code, name, side, target, cheng, day_quote, qty=qty)
+                    acct, code, name, side, target, cheng, day_quote,
+                    qty=qty, conditional=conditional)
             else:
                 result = acct_engine.place_order(
-                    acct, code, name, side, target, cheng, day_quote)
+                    acct, code, name, side, target, cheng, day_quote,
+                    conditional=conditional)
             if result.ok:
                 # engine 通常已把成交记录写入 acct["trades"]；若调用方引擎未写
                 # （如测试注入的假引擎）则兜底追加；并补 balance_after 兼容别名
@@ -779,6 +799,18 @@ def settle_plans(rec_date: str, settle_date: str,
     payload = fetcher(settle_date, sorted(codes), fixture=False)
     quotes = payload.get("quotes") or {}
     degraded = list(payload.get("degraded") or [])
+
+    # 条件单机械卖出（requirements-trading-v1 §二.5）：对存量非当日买入持仓，
+    # 按止损/止盈/超时顺序执行，生成卖出 trade 并入当日记录（在匹配新计划之前）。
+    cond_trades_note: list[str] = []
+    for sid, acct in accounts.items():
+        new_trades = acct_engine.check_conditional_orders(
+            acct, {"date": settle_date}, quotes)
+        if new_trades:
+            cond_trades_note.append(
+                f"{sid} 条件单卖出 {len(new_trades)} 笔："
+                + "，".join(f"{t['code']}@{t['price']:.2f}" for t in new_trades))
+
     filled = rejected = 0
     quotes_missing: list[dict] = []
     unsettled: list[dict] = []
@@ -804,9 +836,20 @@ def settle_plans(rec_date: str, settle_date: str,
         except (TypeError, ValueError):
             qty = 0
         acct = accounts[str(p.get("skill_id") or "unknown")]
+        # 买入计划条件单三字段：缺省按引擎默认（买入价×0.95 / ×1.10 / 13）补齐（§三）
+        conditional = None
+        if side == "buy" and target > 0:
+            conditional = acct_engine.apply_conditional_defaults(
+                {
+                    "stop_loss": p.get("stop_loss"),
+                    "take_profit": p.get("take_profit"),
+                    "max_hold_days": p.get("max_hold_days"),
+                },
+                target,
+            )
         result = acct_engine.place_order(
             acct, code, name, side, target, cheng, day_quote,
-            qty=qty if qty > 0 else None)
+            qty=qty if qty > 0 else None, conditional=conditional)
         if result.ok:
             filled += 1
             if result.trade is not None:
@@ -842,6 +885,8 @@ def settle_plans(rec_date: str, settle_date: str,
     out = {"filled": filled, "rejected": rejected,
            "quotes_missing": quotes_missing, "unsettled": unsettled,
            "degraded": degraded}
+    if cond_trades_note:
+        out["conditional_trades"] = cond_trades_note
     if not plans and not plan_err:
         out["note"] = f"{rec_date} 无计划，已推进账户状态"
     if plan_err:

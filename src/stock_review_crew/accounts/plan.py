@@ -5,6 +5,9 @@
 - plan.json = {date, mode, generated_at, plans[]}；同日重跑整文件覆盖；
 - plans[].rec_date / skill_id / skill_name / code / name / side /
   target_price / position_cheng / qty / source；qty=None 序列化为 JSON null；
+- plans[].stop_loss / take_profit / max_hold_days（可选，requirements-trading-v1 §三）；
+  均可缺省，缺省在撮合入口按 买入价×0.95 / 买入价×1.10 / 13 计算；
+  提供则须 >0 且 止损 < 买入价 < 止盈；max_hold_days 为正整数；None 序列化为 JSON null；
 - 去重键：(rec_date, skill_id, code, side, target_price)，target_price 容差 <0.01
   （2026-08-10 修复过重复提取，语义必须保留）；
 - source 枚举：tool / regex_qty / regex_cheng；skill_id 排除 host/review_assistant；
@@ -114,6 +117,10 @@ class PlanRec:
     position_cheng: float = 0.0
     qty: Optional[int] = None
     source: str = "tool"
+    # 条件单字段（requirements-trading-v1 §三，均可选，None=走引擎默认）：
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    max_hold_days: Optional[int] = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "PlanRec":
@@ -131,12 +138,15 @@ class PlanRec:
             position_cheng=_as_float(d.get("position_cheng", 0) or 0, "position_cheng"),
             qty=_as_qty(d.get("qty")),
             source=str(d.get("source") or "").strip(),
+            stop_loss=_as_optional_float(d.get("stop_loss"), "stop_loss"),
+            take_profit=_as_optional_float(d.get("take_profit"), "take_profit"),
+            max_hold_days=_as_optional_int(d.get("max_hold_days"), "max_hold_days"),
         )
         errors = validate_plan(rec)
         if errors:
             raise ValueError("；".join(errors))
         # 语义归一（数据字典）：code zfill(6)、name 缺失用 code、skill_name 缺失用
-        # skill_id、position_cheng 整值归一、qty 整值归一
+        # skill_id、position_cheng 整值归一、qty 整值归一、max_hold_days 整值归一
         rec.code = rec.code.zfill(6)
         if not rec.name:
             rec.name = rec.code
@@ -146,10 +156,12 @@ class PlanRec:
             rec.position_cheng = int(rec.position_cheng)
         if rec.qty is not None:
             rec.qty = int(rec.qty)
+        if rec.max_hold_days is not None:
+            rec.max_hold_days = int(rec.max_hold_days)
         return rec
 
     def to_dict(self) -> dict:
-        """序列化为 plan.json plans[] 条目（None 语义：qty=null）。"""
+        """序列化为 plan.json plans[] 条目（None 语义：qty/条件单字段=null）。"""
         return {
             "rec_date": self.rec_date,
             "skill_id": self.skill_id,
@@ -161,6 +173,9 @@ class PlanRec:
             "position_cheng": self.position_cheng,
             "qty": self.qty,
             "source": self.source,
+            "stop_loss": self.stop_loss,
+            "take_profit": self.take_profit,
+            "max_hold_days": self.max_hold_days,
         }
 
     def same_as(self, other: "PlanRec") -> bool:
@@ -180,6 +195,23 @@ def _as_float(value: Any, field: str) -> float:
         return float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field} 必须是数字，收到：{value!r}") from exc
+
+
+def _as_optional_float(value: Any, field: str) -> Optional[float]:
+    """可选数字：None/空串/缺失 → None；其余按数字转换（校验在 validate_plan）。"""
+    if value is None or str(value).strip() == "":
+        return None
+    return _as_float(value, field)
+
+
+def _as_optional_int(value: Any, field: str) -> Optional[int]:
+    """可选整数：None/空串/缺失 → None；其余按整数转换（校验在 validate_plan）。"""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} 必须是整数，收到：{value!r}") from exc
 
 
 def _as_qty(value: Any) -> Optional[float]:
@@ -239,6 +271,40 @@ def validate_plan(rec: PlanRec) -> list[str]:
             errors.append(f"qty 必须为正整数，收到：{rec.qty!r}")
     if rec.source not in SOURCES:
         errors.append(f"source 必须为 {'/'.join(SOURCES)}，收到：{rec.source!r}")
+    # 条件单字段（requirements-trading-v1 §三）：可选；提供则须 >0 且
+    # 止损 < 买入价 < 止盈；max_hold_days 为正整数
+    if rec.side == "buy":
+        try:
+            tp = float(rec.target_price)
+        except (TypeError, ValueError):
+            tp = 0.0
+        if rec.stop_loss is not None:
+            try:
+                sl = float(rec.stop_loss)
+                if sl != sl or sl <= 0:
+                    errors.append(f"stop_loss 必须 > 0，收到：{rec.stop_loss!r}")
+                elif tp > 0 and not (sl < tp):
+                    errors.append(
+                        f"stop_loss 必须 < target_price，收到：stop_loss={rec.stop_loss!r} "
+                        f"target_price={rec.target_price!r}")
+            except (TypeError, ValueError):
+                errors.append(f"stop_loss 必须为正数，收到：{rec.stop_loss!r}")
+        if rec.take_profit is not None:
+            try:
+                tk = float(rec.take_profit)
+                if tk != tk or tk <= 0:
+                    errors.append(f"take_profit 必须 > 0，收到：{rec.take_profit!r}")
+                elif tp > 0 and not (tk > tp):
+                    errors.append(
+                        f"take_profit 必须 > target_price，收到：take_profit={rec.take_profit!r} "
+                        f"target_price={rec.target_price!r}")
+            except (TypeError, ValueError):
+                errors.append(f"take_profit 必须为正数，收到：{rec.take_profit!r}")
+        if rec.max_hold_days is not None:
+            mh = rec.max_hold_days
+            if not isinstance(mh, int) or mh <= 0:
+                errors.append(
+                    f"max_hold_days 必须为正整数，收到：{rec.max_hold_days!r}")
     return errors
 
 

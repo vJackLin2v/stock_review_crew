@@ -266,7 +266,7 @@ def _fake_engine(behavior):
     import stock_review_crew.accounts.engine as engine_mod
     orig = engine_mod.place_order
 
-    def fake(account, code, name, side, target_price, position, day):
+    def fake(account, code, name, side, target_price, position, day, **kwargs):
         if side == "buy":
             if behavior == "overdraft":
                 qty, price = 3500, target_price
@@ -314,7 +314,7 @@ def _fake_engine(behavior):
                      "transfer_fee": round(amount * 0.00001, 2),
                      "status": "成交", "reject_reason": "", "cash_after": account["cash"]}
             return SimpleNamespace(ok=True, reason="", trade=trade)
-        return orig(account, code, name, side, target_price, position, day)
+        return orig(account, code, name, side, target_price, position, day, **kwargs)
 
     return fake
 
@@ -381,7 +381,7 @@ def test_run_replay_tracks_engine_rejections(monkeypatch, data_dir):
     monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(data_dir))
     import stock_review_crew.accounts.engine as engine_mod
 
-    def fake(account, code, name, side, target_price, position, day):
+    def fake(account, code, name, side, target_price, position, day, **kwargs):
         return SimpleNamespace(ok=False, reason="涨停拒买：目标价达到涨停价", trade=None)
 
     monkeypatch.setattr(engine_mod, "place_order", fake)

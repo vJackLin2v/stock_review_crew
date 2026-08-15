@@ -2,8 +2,9 @@
 """R14 行情缓存：``data/quotes_cache/{date}.json`` 的 load/save/get_day_quotes。
 
 口径（docs/requirements-r14.md §四.4.2，字段唯一真源）：
-- 缓存文件结构：{date, fetched_at, source, quotes[code]={name, pre_close, high,
-  low, close}, degraded[]}；缺失代码**不在文件里**（而非 None）；
+- 缓存文件结构：{date, fetched_at, source, quotes[code]={name, pre_close, open,
+  high, low, close}, degraded[]}；缺失代码**不在文件里**（而非 None）；
+  open 可选：源拿不到时降级为 None（条件单跳空判断退化为不跳空，绝不抛异常）；
 - 未命中 → 走现有降级链抓取（主源 stock_data.fetch_stock_info，
   腾讯 qt.gtimg.cn 兜底），失败绝不静默：degraded 标注 + 该代码保持缺失；
 - 数据根尊重 STOCK_REVIEW_DATA_DIR（测试隔离），绝不写仓库 data/；
@@ -120,7 +121,7 @@ def fetch_stock_name(code: str) -> Optional[str]:
 
 
 def _fetch_tx_quote(code: str) -> Optional[dict]:
-    """腾讯 qt.gtimg.cn 实时兜底：name/pre_close/high/low/close（实时价，非历史）。"""
+    """腾讯 qt.gtimg.cn 实时兜底：name/pre_close/open/high/low/close（实时价，非历史）。"""
     try:
         import requests
         s = requests.Session()
@@ -129,17 +130,19 @@ def _fetch_tx_quote(code: str) -> Optional[dict]:
             "bj" if code.startswith(("4", "8")) else "sz")
         r = s.get(f"https://qt.gtimg.cn/q={prefix}{code}", timeout=10)
         parts = r.text.split("~")
-        # 字段：1=名称 3=最新价 4=昨收 33=最高 34=最低
+        # 字段：1=名称 3=最新价 4=昨收 5=今开 33=最高 34=最低
         if len(parts) > 34:
             name = str(parts[1]).strip() or code
             close = _to_f(parts[3])
             pre_close = _to_f(parts[4])
+            open_ = _to_f(parts[5])
             high = _to_f(parts[33])
             low = _to_f(parts[34])
             if pre_close is not None and high is not None and low is not None:
                 return {
                     "name": name,
                     "pre_close": pre_close,
+                    "open": open_,
                     "high": high,
                     "low": low,
                     "close": close if close is not None else pre_close,
@@ -173,11 +176,14 @@ def _fetch_day_quote_ex(code: str, date_str: str) -> tuple[Optional[dict], str]:
         if name is None:
             name = fetch_stock_name(code)
         pre_close = quote.get("pre_close")
+        open_ = quote.get("open")
         high = quote.get("high")
         low = quote.get("low")
         close = quote.get("close")
         if pre_close is None:
             pre_close = info.get("pre_close")
+        if open_ is None:
+            open_ = info.get("open")
         if high is None:
             high = info.get("high")
         if low is None:
@@ -189,6 +195,7 @@ def _fetch_day_quote_ex(code: str, date_str: str) -> tuple[Optional[dict], str]:
             if daily:
                 last = daily[-1]
                 pre_close = last.get("pre_close")
+                open_ = last.get("open")
                 high = last.get("high")
                 low = last.get("low")
                 close = last.get("close")
@@ -198,6 +205,7 @@ def _fetch_day_quote_ex(code: str, date_str: str) -> tuple[Optional[dict], str]:
             "date": date_str,
             "name": name,
             "pre_close": float(pre_close),
+            "open": float(open_) if open_ is not None else None,
             "high": float(high),
             "low": float(low),
             "close": float(close) if close is not None else float(pre_close),
@@ -215,7 +223,7 @@ def _fetch_day_quote_ex(code: str, date_str: str) -> tuple[Optional[dict], str]:
 
 
 def fetch_day_quote(code: str, date_str: str) -> Optional[dict]:
-    """复用现有降级链获取当日行情（pre_close/high/low/close）：
+    """复用现有降级链获取当日行情（pre_close/open/high/low/close）：
     主源 stock_data.fetch_stock_info → 腾讯 qt.gtimg.cn 兜底（实时价，非历史，
     **仅当天允许**；历史日期主源失败返回 None，不采信实时价）。
     失败返回 None（调用方负责 degraded 标注，绝不静默）。
@@ -235,11 +243,13 @@ def fixture_quotes(date_str: str, codes: list[str]) -> dict:
                    .hexdigest()[:8], 16)
         pre_close = round(10.0 + (seed % 2000) / 100.0, 2)  # 10.00–29.99
         close = round(pre_close * 1.02, 2)
+        open_ = round(pre_close * 1.005, 2)
         high = round(pre_close * 1.05, 2)
         low = round(pre_close * 0.98, 2)
         quotes[code] = {
             "name": f"样例{code}",
             "pre_close": pre_close,
+            "open": open_,
             "high": high,
             "low": low,
             "close": close,
@@ -257,7 +267,7 @@ def get_day_quotes(date_str: str, codes: list[str] | tuple[str, ...] | set[str],
       缺失代码逐 code 补抓并合并落盘（2026-08-14 起）；重放离线可用且确定性
       （同缓存同输出）；补抓仍失败的代码保持缺失并在 degraded 标注，绝不静默；
     - 缓存文件不存在/损坏 → 未命中逐 code 调用 fetcher 抓取：fetcher(code) ->
-      {name, pre_close, high, low, close} | None；None/抛异常 = 该代码失败 →
+      {name, pre_close, open, high, low, close} | None；None/抛异常 = 该代码失败 →
       degraded 标注且不在结果里（绝不静默）；fetcher 缺省 = 真实降级链
       （fetch_stock_info → 腾讯 qt.gtimg.cn 兜底）；抓取后落盘缓存文件
       （{date, fetched_at, source, quotes, degraded}）；
@@ -304,9 +314,11 @@ def get_day_quotes(date_str: str, codes: list[str] | tuple[str, ...] | set[str],
         if (quote is not None and quote.get("pre_close") is not None
                 and quote.get("high") is not None and quote.get("low") is not None):
             close = quote.get("close")
+            open_ = quote.get("open")
             quotes[code] = {
                 "name": quote.get("name") or code,
                 "pre_close": float(quote["pre_close"]),
+                "open": float(open_) if open_ is not None else None,
                 "high": float(quote["high"]),
                 "low": float(quote["low"]),
                 "close": float(close) if close is not None else float(quote["pre_close"]),

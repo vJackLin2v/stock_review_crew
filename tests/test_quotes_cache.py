@@ -4,7 +4,7 @@
 契约（唯一真源：docs/requirements-r14.md 第四节.2）：
 - 缓存文件：{STOCK_REVIEW_DATA_DIR}/quotes_cache/{date}.json，
   内容 {date, fetched_at, source, quotes, degraded}；
-- quotes[code] = {name, pre_close, high, low, close}；抓取失败的代码【不在】quotes 里（而非 None）；
+- quotes[code] = {name, pre_close, open, high, low, close}；抓取失败的代码【不在】quotes 里（而非 None）；
 - degraded：该日取数降级/缺失标注（铁律 7，绝不静默错报）；
 - ensure_quotes(date, codes, fixture=False)：缓存优先（命中不联网、不改写文件）；
   未命中逐 code 抓取并落盘（真实降级链：历史主源→腾讯→...）；失败代码 degraded 标注且不在结果；
@@ -48,8 +48,10 @@ def data_dir():
             break
 
 
-def _quote(code="600010", close=8.5, pre_close=8.3, high=8.6, low=8.2, name="包钢股份"):
-    return {"name": name, "pre_close": pre_close, "high": high, "low": low, "close": close}
+def _quote(code="600010", close=8.5, pre_close=8.3, high=8.6, low=8.2, name="包钢股份",
+           open_=8.35):
+    return {"name": name, "pre_close": pre_close, "open": open_,
+            "high": high, "low": low, "close": close}
 
 
 def _save_cache(data_dir, date_str, quotes_map, degraded=None, source="test"):
@@ -78,7 +80,7 @@ def test_miss_fetch_and_persist(monkeypatch, data_dir):
     raw = json.loads(p.read_text("utf-8"))
     assert raw["date"] == "2026-08-11"
     assert {"date", "fetched_at", "source", "quotes", "degraded"} <= set(raw)
-    assert set(raw["quotes"]["600010"]) == {"name", "pre_close", "high", "low", "close"}
+    assert set(raw["quotes"]["600010"]) == {"name", "pre_close", "open", "high", "low", "close"}
     assert quotes.load_quotes("2026-08-11")["quotes"]["600010"] == r["quotes"]["600010"]
 
 

@@ -7,6 +7,8 @@
 - side 判定：有「买入/卖出」前缀用前缀；无前缀用价格关键字（买入价→buy、卖出价→sell）；
 - qty/cheng 互斥：匹配「N股」→ qty 语义（source=regex_qty），
   匹配「仓位N成」→ 成数语义（source=regex_cheng）；
+- 买入可选条件单字段（requirements-trading-v1 §三）：止损XX.XX元 / 止盈XX.XX元 /
+  持有N天；解析不到保持 None（撮合入口按引擎默认计算）；
 - qty 关键字（买入N股/卖出N股）出现时须与 side 一致（旧 qty 式要求，防止矛盾输入入库）；
 - 卖出且 code 不在 held_codes → 跳过并记录 {"type":"sell_skipped_no_position",...}；
 - 通过 accounts.plan.add 写入 plan registry（复用校验/去重/归一），单笔失败不阻塞；
@@ -28,6 +30,9 @@ _PLAN_RE = re.compile(
     r"(?P<code>\d{6})\s*(?:(?P<name>[^\s：:，。]{1,12})\s*)?[：:]\s*"
     r"(?P<price_kw>买入价|卖出价)\s*(?P<price>\d+(?:\.\d+)?)\s*元"
     r"[，,，\s]*(?:(?:(?P<qty_kw>买入|卖出)\s*)?(?P<qty>\d+)\s*股|仓位\s*(?P<cheng>\d+)\s*成)"
+    r"(?:\s*[，,，\s]*止损\s*(?P<stop_loss>\d+(?:\.\d+)?)\s*元)?"
+    r"(?:\s*[，,，\s]*止盈\s*(?P<take_profit>\d+(?:\.\d+)?)\s*元)?"
+    r"(?:\s*[，,，\s]*持有\s*(?P<max_hold_days>\d+)\s*天)?"
 )
 
 
@@ -45,6 +50,21 @@ def _side_for(match: re.Match) -> str:
         return "buy" if prefix == "买入" else "sell"
     price_kw = match.group("price_kw")
     return "buy" if price_kw == "买入价" else "sell"
+
+
+def _conditional_fields(match: re.Match, side: str) -> dict:
+    """买入计划可选条件单字段（止损/止盈/持有天数），解析不到保持 None。
+    非买入(side == sell)计划一律 None（卖出计划不新增字段）。"""
+    if side != "buy":
+        return {"stop_loss": None, "take_profit": None, "max_hold_days": None}
+    sl = match.group("stop_loss")
+    tp = match.group("take_profit")
+    mh = match.group("max_hold_days")
+    return {
+        "stop_loss": float(sl) if sl is not None else None,
+        "take_profit": float(tp) if tp is not None else None,
+        "max_hold_days": int(mh) if mh is not None else None,
+    }
 
 
 def extract_plans(
@@ -95,6 +115,7 @@ def extract_plans(
                         "position_cheng": 0,
                         "qty": int(float(qty)),
                         "source": "regex_qty",
+                        **_conditional_fields(m, side),
                     }
                 )
                 tool_log.append(
@@ -113,6 +134,7 @@ def extract_plans(
                         "position_cheng": float(cheng),
                         "qty": None,
                         "source": "regex_cheng",
+                        **_conditional_fields(m, side),
                     }
                 )
                 tool_log.append(
