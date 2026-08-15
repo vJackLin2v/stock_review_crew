@@ -228,3 +228,63 @@ def test_buy_kechuang_decrement_floor_at_min_unit():
     assert r.ok, r.reason
     assert r.trade["qty"] == 200
     assert r.trade["qty"] >= 200
+
+
+# ---------- 撮合判定方向性修复（requirements-order-fill-direction.md，G1-G5） ----------
+# 限价单语义：买入现价≤目标价成交（仅 target<low 拒）；卖出现价≥目标价成交（仅 target>high 拒）。
+# 成交价保持 price=target 不变；G2 由 test_buy_reject_target_not_touched、G5 由
+# test_buy_reject_at_limit_up 回归（见下），此处补齐 G1/G3/G4。
+
+def test_g1_buy_target_above_high_fills():
+    """G1：买入 target>high（当日现价整天低于目标价，更便宜）→ 成交。
+    price=target=10.00；数量按 target×成数：100000×0.3/(10×1.001)=2997→取整 2900 股；
+    佣金 7.25 / 过户费 0.29 → 现金 70,992.46（对齐 test_buy_normal_manual 口径）。"""
+    acct = open_account("alang")
+    r = place_order(acct, "600519", "贵州茅台", "buy", 10.00, 3,
+                    _day(low=9.5, high=9.8, close=9.7))
+    assert r.ok, r.reason
+    t = r.trade
+    assert t["price"] == 10.00
+    assert t["qty"] == 2900
+    assert t["fee"] == 7.25
+    assert t["transfer_fee"] == 0.29
+    assert t["stamp_tax"] == 0.0
+    assert acct["cash"] == pytest.approx(70_992.46)
+    pos = acct["positions"]["600519"]
+    assert pos["qty"] == 2900 and pos["frozen_qty"] == 2900  # T+1 冻结
+    assert pos["avg_cost"] == pytest.approx(10.0)
+
+
+def test_g3_sell_target_below_low_fills():
+    """G3：卖出 target<low（当日现价高于目标价，划算）→ 成交，price=target=10.00。
+    先建仓 2900（买 target=10，当日区间 [10.0,10.8] 覆盖）→ 次日（低=10.2/高=10.5，
+    现价高于目标价）卖 target=10 成数 10 → 全卖 2900 股（T+1 到期可用），清仓。"""
+    acct = open_account("alang")
+    b = place_order(acct, "600519", "x", "buy", 10.00, 3, _day())
+    assert b.ok, b.reason
+    assert b.trade["qty"] == 2900
+    # 次日卖出：现价高于目标价（low=10.20 ≥ target=10.00），应成交
+    r = place_order(acct, "600519", "x", "sell", 10.00, 10,
+                    _day(date="2026-07-16", pre_close=10.5, low=10.20, high=10.50,
+                         close=10.4))
+    assert r.ok, r.reason
+    assert r.trade["price"] == 10.00
+    assert r.trade["qty"] == 2900  # 卖出数量 ≤ 可用持仓（2900）
+    assert acct["cash"] == pytest.approx(70_992.46 + 29000 - 7.25 - 14.5 - 0.29)
+    assert "600519" not in acct["positions"]  # 全卖清仓
+
+
+def test_g4_sell_target_above_high_rejected():
+    """G4：卖出 target>high（当日现价低于目标价，等反弹）→ 拒绝，reason 含「未触及」。"""
+    acct = open_account("alang")
+    b = place_order(acct, "600519", "x", "buy", 10.00, 3, _day())
+    assert b.ok, b.reason
+    r = place_order(acct, "600519", "x", "sell", 10.00, 10,
+                    _day(date="2026-07-16", pre_close=10.5, high=9.8, low=9.5, close=9.7))
+    assert not r.ok and "未触及" in r.reason
+    # 拒绝不影响已有持仓
+    assert acct["positions"]["600519"]["qty"] == 2900
+
+
+# G2（买入 target<low 拒）回归：test_buy_reject_target_not_touched（_day(low=10.10)）
+# G5（涨停拒买）回归：test_buy_reject_at_limit_up

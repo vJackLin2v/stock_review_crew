@@ -193,8 +193,14 @@ def place_order(
         else:
             return TradeResult(False, f"未知方向：{side}")
 
-        # 当日价格区间覆盖目标价才成交
-        if target < low or target > high:
+        # 限价单语义（2026-08-16 用户确认）：买入现价 ≤ 目标价即触发（现价更便宜应直接买）；
+        # 卖出现价 ≥ 目标价即触发（现价更高应直接卖）。成交价一律按目标价（口径不变）。
+        if side == "buy" and low > target:
+            return TradeResult(
+                False,
+                f"当日未触及目标价 {target:.2f}（区间 {low:.2f}–{high:.2f}）",
+            )
+        if side == "sell" and high < target:
             return TradeResult(
                 False,
                 f"当日未触及目标价 {target:.2f}（区间 {low:.2f}–{high:.2f}）",
