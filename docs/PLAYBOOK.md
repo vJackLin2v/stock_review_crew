@@ -864,4 +864,26 @@
   `run_review_day` 的 stage_timings 从空到 `{fetch,news,analysts,host,report}`；
   `test_r2_analysts_total_5_and_progress` 恢复全绿。教训：**给共享进度回调加「子事件」维度时，
   要么让不关心的调用方显式跳过（_progress_cb ignore），要么默认关闭、需要方 opt-in
-  （analyst_events 开关），避免新事件破坏既有 3 参回调/替换 _emit 的测试。**
+  （analyst_events 开关），避免新事件破坏既有 3 参回调/替换 _emit 的测试。
+
+### [2026-08-16] 回测实时诊断面板：断言口径 + 并行代理工作区 + 历史数据不回填
+- 现象/需求：回测页看不到「卡在哪/为什么/第几次/多久」→ current 契约增强（8 字段：
+  date/stage/message/pct/attempt/attempts/last_error/elapsed_ms，GET 实时算）+ 重试可见 +
+  统计时间含全部重试（review.elapsed_ms 累计所有尝试墙钟含 RETRY_SLEEP，不再只算末次成功）。
+- 坑 1（测试断言口径）：建议 `review.elapsed_ms >= 400` 被实证否定——注入 mock
+  `make_fake_day()` 的 stage_timings 固定 100×4=400，但 **mock 并不真 sleep**，真实累计墙钟
+  只有 3~6ms，`>=400` 必然误红（测试 bug）。教训：**对「真实墙钟」类字段的断言必须基于
+  可测语义（非负 int + 口径相等 `elapsed == review + settle` + 慢重试 mock 的下界），
+  不要拿固定 stage 求和当下界**——那是旧语义的产物，与新语义无关联。
+- 坑 2（并行 TEST/IMPL 共享工作区）：TEST 写「预期红」测试时，IMPL 已把未提交改动落入同一
+  工作区 → 测试直接全绿，无法证明「测试能卡住未实现契约」。解法：断言设计上让「旧实现必然红」
+  （如 A1 八字段检查、A4 attempts 恒等），并明确区分「实现未就绪红」vs「已合并实现绿」；
+  另外 **send_message 可唤醒已 finished 的 subagent 继续新 turn**（排队消息在 agent 退出后 parked）。
+- 坑 3（历史数据不回填）：修复 `day["attempts"]=attempt` bug 后，**旧 progress.json 里已是
+  旧值**（如 attempts=1/3），新代码不回填——验收时历史回测的 attempts 仍显示旧语义
+  （前端「重试 N-1 次」徽标对旧数据 attempts=3 显示「重试 2 次」，恰好与新契约兼容，但
+  要与「新回测才写 attempts=3」区分）。教训：**契约变更只影响新数据，验收历史回测时
+  先确认数据产生于旧代码还是新代码。**
+- 备注/复现：`tests/test_backtest_live_diag.py` 8 用例（A1-A7）；`test_backtest.py` 两处
+  旧断言同步（attempts==1→3、review==400→非负+口径相等）；前端 build + msedge headless
+  冒烟（`.tmp/smoke_bt.py`：历史回测打开、重试徽标、终态不误显「正在重试」）。**
