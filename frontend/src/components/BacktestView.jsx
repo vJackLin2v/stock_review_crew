@@ -451,21 +451,15 @@ export default function BacktestView({ onBack }) {
   const loadHistory = useCallback(async () => {
     try {
       const res = await api.getBacktestHistory();
-      setHistory({
-        runs: (Array.isArray(res.data && res.data.runs) ? res.data.runs : [])
-          .map(normalizeBacktestHistoryItem),
-        loading: false,
-        error: "",
-      });
+      const runs = (Array.isArray(res.data && res.data.runs) ? res.data.runs : [])
+        .map(normalizeBacktestHistoryItem);
+      setHistory({ runs, loading: false, error: "" });
+      return runs;
     } catch (err) {
       setHistory({ runs: [], loading: false, error: (err && err.message) || "历史回测加载失败" });
+      return [];
     }
   }, []);
-
-  useEffect(() => {
-    loadHistory();
-    return () => stopPolling();
-  }, [loadHistory, stopPolling]);
 
   // 节点已耗时：运行中每秒自增 tick 实时跳动；bt 快照（每次轮询）更新时重置基准
   useEffect(() => {
@@ -499,6 +493,30 @@ export default function BacktestView({ onBack }) {
     },
     [stopPolling, loadHistory]
   );
+
+  // 挂载：加载历史；若存在运行中的回测且当前未在轮询（如切 tab 后重进）→ 自动打开并恢复轮询
+  // 注意：必须放在 beginPolling 定义之后（deps 引用它，避免 TDZ）。
+  useEffect(() => {
+    let alive = true;
+    loadHistory().then((runs) => {
+      if (!alive || pollRef.current) return;
+      const running = (runs || []).find((r) => r.isRunning);
+      if (running) {
+        api
+          .getBacktest(running.id)
+          .then((snap) => {
+            if (!alive || pollRef.current) return;
+            const norm = normalizeBacktest(snap);
+            if (norm.isRunning) beginPolling(running.id, norm);
+          })
+          .catch(() => {});
+      }
+    });
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+  }, [loadHistory, beginPolling, stopPolling]);
 
   const handleStart = useCallback(async () => {
     if (!startDate || !endDate) {
@@ -552,14 +570,19 @@ export default function BacktestView({ onBack }) {
       setBtError("");
       try {
         const snap = await api.getBacktest(id);
-        setBt(normalizeBacktest(snap));
-        setPolling(false);
-        stopPolling();
+        const norm = normalizeBacktest(snap);
+        setBt(norm);
+        if (norm.isRunning) {
+          // 打开运行中的回测 → 恢复 2s 轮询（自动刷新进度）
+          beginPolling(id, norm);
+        } else {
+          stopPolling();
+        }
       } catch (err) {
         setBtError((err && err.message) || "加载历史回测失败");
       }
     },
-    [stopPolling]
+    [stopPolling, beginPolling]
   );
 
   const total = num(bt && bt.days_total, NaN);
