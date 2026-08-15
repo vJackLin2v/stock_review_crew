@@ -145,3 +145,46 @@
 - B2：实时取数路径缺失核心块 → 消息不变（含「全部数据源不可用」）。
 - B3：快照核心块完整时回放 → 校验通过，无回归（test_offline_replay.py 全绿）。
 - B4：前端透传消息展示，无需改动。
+
+---
+
+## 追加：每天明细表格 UI + 当天已耗时 + 重试原因/重试耗时（2026-08-16 用户确认）
+
+### 需求（用户原话归纳）
+1. 优化每天明细的表格 UI（DayDetail 现在是纯耗时条形，信息密度低）；
+2. 增加「当天已耗时」统计（当天总耗时 = settle + 复盘全部尝试，含重试等待），用于统计总时间；
+3. 若进行了重试，**必须给出重试原因和重试耗时**（现在只有累计数与最终错误，看不到每次尝试的失败原因与耗时）。
+
+### 后端契约（backend/backtest.py `_run_one_day`）
+新增 `day["attempts_log"]`（数组，**每次尝试一条**，成功/失败都记录，落盘）：
+```python
+{"attempt": 1, "ok": False, "reason": "<失败中文原因>", "elapsed_ms": 1234, "retry_sleep_ms": 2000}
+{"attempt": 2, "ok": True,  "reason": "",            "elapsed_ms": 95000, "retry_sleep_ms": 0}
+```
+- `ok`：该次尝试成功/失败；`reason`：失败原因（成功为空串）；`elapsed_ms`：该次尝试墙钟
+  （不含 sleep）；`retry_sleep_ms`：该次失败后重试等待（成功那次为 0）。
+- 累计口径不变：`day.elapsed_ms == settle.elapsed_ms + review.elapsed_ms`，
+  `review.elapsed_ms == sum(attempts_log.elapsed_ms) + sum(attempts_log.retry_sleep_ms)`。
+- fail-fast 失败日同样写 attempts_log（3 条全失败）。
+- 历史回测数据无 attempts_log → 前端缺省处理（不显示重试明细）。
+
+### 前端（BacktestView.jsx + normalize.js + styles.css）
+1. `normalizeBacktestDay` 映射 `attempts_log`（缺省安全）。
+2. **DayDetail 表格化**：
+   - 顶部「当天已耗时」总览（= day.elapsed_ms，含重试；与折线图口径一致），
+     并拆分为 settle 撮合 + review 复盘（合计）；
+   - 节点/分析师明细改为表格行（项目 / 耗时 / 占比），保留条形视觉或改纯表格
+     （样式合理即可，风格与现有 bt-* 一致）；
+3. **重试明细表**（`attempts_log` 存在且含 `ok=False` 条目时显示）：
+   - 列：尝试次数 / 结果（成功/失败）/ 失败原因（红）/ 本次耗时 / 重试等待；
+   - 让用户看到完整重试链（第 N 次失败原因 + 每次耗时）。
+4. 顶部 bt-progress-meta 的「节点已耗时」等既有功能不变。
+
+### 验收
+- D1：新回测 done/failed 日 `attempts_log` 每条含 attempt/ok/reason/elapsed_ms/
+  retry_sleep_ms；`sum(elapsed_ms)+sum(retry_sleep_ms) == review.elapsed_ms`。
+- D2：重试过的天 attempts_log 含失败条目（reason 非空中文）；首次即成功的天单条 ok=True。
+- D3：前端 DayDetail 显示「当天已耗时」总览；有重试的天显示重试明细表（原因+耗时），
+  无重试的天不显示重试表；normalize 对缺省 attempts_log 安全。
+- D4：npm run build 通过；msedge headless 冒烟：历史回测打开后每天明细含当天已耗时，
+  重试过（attempts>1）的天显示重试明细表。

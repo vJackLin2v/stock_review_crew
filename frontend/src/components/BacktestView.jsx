@@ -62,31 +62,94 @@ const BT_TOP_STATUS = {
   cancelled: "已取消",
 };
 
-// 单日行的横向耗时条（settle / 各节点 / 各分析师，按最大值归一）
-function DurationBar({ label, value, max, accent }) {
+// 单日行的横向耗时条不再使用：耗时条已并入明细表格行的条形视觉（DetailTableRow）
+
+// 明细表格行：项目（内置时长条形视觉）/ 耗时 / 占比
+function DetailTableRow({ label, value, max, accent }) {
   const n = num(value, NaN);
-  if (!Number.isFinite(n)) {
-    return (
-      <div className="bt-bar-row">
-        <span className="bt-bar-label">{label}</span>
-        <span className="bt-bar-value">—</span>
-      </div>
-    );
-  }
-  const ratio = max > 0 ? Math.min(100, (n / max) * 100) : 0;
+  const ratio =
+    Number.isFinite(n) && Number.isFinite(max) && max > 0
+      ? Math.min(100, (n / max) * 100)
+      : 0;
   return (
-    <div className="bt-bar-row">
-      <span className="bt-bar-label">{label}</span>
-      <div className="bt-bar-track">
-        <div className="bt-bar-fill" style={{ width: `${ratio}%`, background: accent || ACCENT }} />
-      </div>
-      <span className="bt-bar-value">{fmtMS(n)}</span>
+    <tr className="bt-table-row">
+      <td className="bt-cell-proj">
+        {Number.isFinite(n) ? (
+          <div className="bt-table-ticks">
+            <div
+              className="bt-table-tick"
+              style={{ width: `${ratio}%`, background: accent || ACCENT }}
+            />
+          </div>
+        ) : null}
+        <span className="bt-bar-label">{label}</span>
+      </td>
+      <td className="bt-cell-ms">{fmtMS(n)}</td>
+      <td className="bt-cell-pct">
+        {Number.isFinite(n) && Number.isFinite(max) && max > 0
+          ? `${Math.round(ratio)}%`
+          : "—"}
+      </td>
+    </tr>
+  );
+}
+
+// 当天总览小条（settle / review）拆分
+function TotalSplit({ settleMs, reviewMs }) {
+  return (
+    <div className="bt-total-split">
+      <span>
+        settle 撮合 <b className="bt-total-num">{fmtMS(settleMs)}</b>
+      </span>
+      <span>
+        review 复盘（合计） <b className="bt-total-num">{fmtMS(reviewMs)}</b>
+      </span>
     </div>
   );
 }
 
-// 单日展开明细：settle + 4 节点 + 5 分析师耗时（横向条形）
+// 重试明细表：attempts_log 存在且含失败条目时渲染
+function RetryTable({ rows }) {
+  const attempts = (Array.isArray(rows) ? rows : []).filter((a) => a && a.attempt != null);
+  if (!attempts.length) return null;
+  const hasFail = attempts.some((a) => a.ok === false);
+  if (!hasFail) return null; // 无失败条目（无重试）不显示该表
+  return (
+    <div className="bt-retry-block">
+      <div className="bt-detail-sub">重试明细</div>
+      <table className="bt-retry-table">
+        <thead>
+          <tr>
+            <th>尝试次数</th>
+            <th>结果</th>
+            <th>失败原因</th>
+            <th>本次耗时</th>
+            <th>重试等待</th>
+          </tr>
+        </thead>
+        <tbody>
+          {attempts.map((a) => (
+            <tr key={a.attempt} className={a.ok ? "" : "bt-retry-fail-row"}>
+              <td>第 {num(a.attempt, NaN) == null ? "—" : a.attempt} 次</td>
+              <td>
+                <span className={`bt-retry-result ${a.ok ? "ok" : "fail"}`}>
+                  {a.ok ? "成功" : "失败"}
+                </span>
+              </td>
+              <td className={a.ok ? "" : "bt-retry-reason"}>{(a.reason || "").trim() || "—"}</td>
+              <td className="bt-cell-ms">{fmtMS(a.elapsed_ms)}</td>
+              <td className="bt-cell-ms">{fmtMS(a.retry_sleep_ms)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// 单日展开明细：当天已耗时总览 + settle/节点/分析师明细表格 + 重试明细表
 function DayDetail({ day }) {
+  const dayMs = num(day.elapsed_ms, NaN);
   const settleMs = num(day.settle && day.settle.elapsed_ms, NaN);
   const reviewMs = num(day.review && day.review.elapsed_ms, NaN);
   const stageList = (Array.isArray(day.stages) ? day.stages : [])
@@ -108,7 +171,14 @@ function DayDetail({ day }) {
 
   return (
     <div className="bt-day-detail">
-      <div className="bt-detail-title">当天耗时分解</div>
+      {/* 顶部：当天已耗时总览（= day.elapsed_ms，与折线图口径一致，含重试） */}
+      <div className="bt-total-overview">
+        <div className="bt-total-big">
+          <span className="bt-total-label">当天已耗时</span>
+          <span className="bt-total-value">{fmtMS(dayMs)}</span>
+        </div>
+        <TotalSplit settleMs={settleMs} reviewMs={reviewMs} />
+      </div>
       {/* settle 成交·拒绝 摘要 */}
       <div className="bt-settle-summary">
         <span>settle：{fmtMS(settleMs)}</span>
@@ -118,20 +188,40 @@ function DayDetail({ day }) {
           拒绝 <b className="neg">{num(day.settle && day.settle.rejected, NaN) == null ? "—" : `${num(day.settle && day.settle.rejected)} 笔`}</b>
         </span>
       </div>
-      <DurationBar label="settle 撮合" value={settleMs} max={maxValue} accent="#5c7cfa" />
-      <DurationBar label="review 复盘（合计）" value={reviewMs} max={maxValue} accent={ACCENT} />
-      {stageList.length ? (
-        <div className="bt-detail-sub">节点耗时</div>
-      ) : null}
-      {stageList.map((s) => (
-        <DurationBar key={s.key} label={STAGE_LABELS[s.key] || stageLabel(s.key)} value={num(s.elapsed_ms, NaN)} max={maxValue} accent={ACCENT} />
-      ))}
-      {analystList.length ? (
-        <div className="bt-detail-sub">分析师耗时</div>
-      ) : null}
-      {analystList.map((a, i) => (
-        <DurationBar key={`${a.skill_id || i}-${i}`} label={a.name || `分析师${i + 1}`} value={num(a && a.elapsed_ms, NaN)} max={maxValue} accent="#6d5bd0" />
-      ))}
+      <div className="bt-detail-title">节点 / 分析师明细</div>
+      <table className="bt-table">
+        <thead>
+          <tr>
+            <th>项目</th>
+            <th>耗时</th>
+            <th>占比</th>
+          </tr>
+        </thead>
+        <tbody>
+          <DetailTableRow label="settle 撮合" value={settleMs} max={maxValue} accent="#5c7cfa" />
+          <DetailTableRow label="review 复盘（合计）" value={reviewMs} max={maxValue} accent={ACCENT} />
+          {stageList.map((s) => (
+            <DetailTableRow
+              key={s.key}
+              label={STAGE_LABELS[s.key] || stageLabel(s.key)}
+              value={num(s.elapsed_ms, NaN)}
+              max={maxValue}
+              accent={ACCENT}
+            />
+          ))}
+          {analystList.map((a, i) => (
+            <DetailTableRow
+              key={`${a.skill_id || i}-${i}`}
+              label={a.name || `分析师${i + 1}`}
+              value={num(a && a.elapsed_ms, NaN)}
+              max={maxValue}
+              accent="#6d5bd0"
+            />
+          ))}
+        </tbody>
+      </table>
+      {/* 重试明细表（有失败条目才显示） */}
+      <RetryTable rows={day.attempts_log} />
       {/* 失败原因 */}
       {day.error ? (
         <div className="bt-day-error">

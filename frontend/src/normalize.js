@@ -571,6 +571,13 @@ export function normalizeBacktestDay(d = {}) {
     },
     review: { elapsed_ms: nullable(review.elapsed_ms) },
     stages: arr(x.stages).map(normalizeBacktestStage),
+    attempts_log: arr(x.attempts_log).map((a) => ({
+      attempt: nullable(a && a.attempt),
+      ok: !!(a && a.ok),
+      reason: str(a && a.reason),
+      elapsed_ms: nullable(a && a.elapsed_ms),
+      retry_sleep_ms: nullable(a && a.retry_sleep_ms),
+    })),
     error: str(x.error),
     isFailed: status === "failed",
     isSkipped: status === "skipped",

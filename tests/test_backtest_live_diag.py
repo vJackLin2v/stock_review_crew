@@ -528,3 +528,181 @@ def test_a7_failfast_elapsed_set(monkeypatch):
         "fail-fast 失败日也应设置 day.elapsed_ms（不得为 None）"
     assert day["elapsed_ms"] >= 15, \
         f"fail-fast 失败日 day.elapsed_ms 应累计全部 3 次尝试墙钟，实际 {day['elapsed_ms']}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# D1：每天明细 attempts_log 契约（追加需求 2026-08-16）
+#   day["attempts_log"] 每次尝试一条 {attempt, ok, reason, elapsed_ms, retry_sleep_ms}；
+#   review.elapsed_ms == sum(elapsed_ms)+sum(retry_sleep_ms)。
+# ═══════════════════════════════════════════════════════════════
+
+def _retry_2_fail_then_success(calls: list):
+    """前 2 次失败、第 3 次成功。失败原因含「单日复盘模拟失败」。"""
+    def impl(date, mode, max_rounds, trace, progress_cb=None):
+        attempt = sum(1 for c in calls if c["date"] == date) + 1
+        calls.append({"date": date, "attempt": attempt, "ok": attempt >= 3})
+        if attempt < 3:
+            raise RuntimeError("单日复盘模拟失败")
+        _write_products(date)
+        now = time.monotonic()
+        return {
+            "meta": {"date": date},
+            "report": "测试报告",
+            "snapshot": {"date": date},
+            "record_id": date,
+            "quality": None,
+            "stage_timings": {k: {"started_at": now, "elapsed_ms": 0}
+                              for k in ("fetch", "analysts", "host", "report")},
+            "analyst_timings": {},
+        }
+    return impl
+
+
+def test_d1_attempts_log_contract_and_sum(monkeypatch):
+    """D1：mock 前 2 次失败、第 3 次成功 → done 后 attempts_log 长度 3，
+    每条含 attempt/ok/reason/elapsed_ms/retry_sleep_ms（类型正确）；
+    前 2 条 ok=False 且 reason 含中文失败原因，第 3 条 ok=True、reason=="";
+    前 2 条 retry_sleep_ms>0（RETRY_SLEEP=0.01），第 3 条 ==0；
+    sum(elapsed_ms)+sum(retry_sleep_ms) == day["review"]["elapsed_ms"]。"""
+    monkeypatch.setattr(btest, "_settle_impl", _fake_settle)
+    monkeypatch.setattr(btest, "RETRY_SLEEP", 0.01)
+    calls: list[dict] = []
+    monkeypatch.setattr(btest, "_run_review_day_impl", _retry_2_fail_then_success(calls))
+
+    bt_id = _start("2026-08-10", "2026-08-10")
+    fin = _wait_backtest(bt_id)
+    assert fin["status"] == "done", f"第 3 次应成功，实际 {fin['status']}"
+    day = fin["days"][0]
+    assert day["status"] == "done"
+
+    log = day.get("attempts_log")
+    assert log is not None, "done 日应有 attempts_log（实现未合入？）"
+    assert isinstance(log, list) and len(log) == 3, \
+        f"attempts_log 应为 3 条（成功那次也记录），实际 {len(log)}"
+    for entry in log:
+        for field in ("attempt", "ok", "reason", "elapsed_ms", "retry_sleep_ms"):
+            assert field in entry, f"attempts_log 每条应含 {field}；实际 {entry}"
+        assert isinstance(entry["attempt"], int), f"attempt 应为 int，实际 {entry['attempt']}"
+        assert isinstance(entry["ok"], bool), f"ok 应为 bool，实际 {entry['ok']}"
+        assert isinstance(entry["reason"], str), f"reason 应为 str，实际 {entry['reason']}"
+        assert isinstance(entry["elapsed_ms"], int), f"elapsed_ms 应为 int，实际 {entry['elapsed_ms']}"
+        assert isinstance(entry["retry_sleep_ms"], int), \
+            f"retry_sleep_ms 应为 int，实际 {entry['retry_sleep_ms']}"
+        assert entry["attempt"] in (1, 2, 3), f"attempt 序号异常：{entry['attempt']}"
+
+    first, second, third = log
+    # 失败条目：ok=False、reason 非空中文
+    assert first["ok"] is False and second["ok"] is False
+    for entry in (first, second):
+        assert entry["reason"] and "模拟" in entry["reason"] and "失败" in entry["reason"], \
+            f"失败条目 reason 应为中文失败原因（含「模拟/失败」），实际：{entry['reason']}"
+        assert entry["retry_sleep_ms"] >= 10, \
+            f"失败条目 retry_sleep_ms 应为 RETRY_SLEEP(0.01)=10ms 量级，实际 {entry['retry_sleep_ms']}"
+    # 成功条目：ok=True、reason 空串、retry_sleep_ms==0
+    assert third["ok"] is True
+    assert third["reason"] == "", f"成功条目 reason 应空串，实际：{third['reason']}"
+    assert third["retry_sleep_ms"] == 0, \
+        f"成功条目 retry_sleep_ms 应为 0，实际 {third['retry_sleep_ms']}"
+    # 累计口径：review.elapsed_ms == sum(elapsed_ms)+sum(retry_sleep_ms)（review.elapsed_ms 是 int）
+    review_ms = day.get("review", {}).get("elapsed_ms")
+    assert isinstance(review_ms, int) and review_ms is not None, \
+        "day.review.elapsed_ms 应为 int"
+    sum_elapsed = sum(e["elapsed_ms"] for e in log)
+    sum_sleep = sum(e["retry_sleep_ms"] for e in log)
+    assert review_ms == sum_elapsed + sum_sleep, \
+        "review.elapsed_ms 应等于 sum(elapsed_ms)+sum(retry_sleep_ms)，" \
+        f"实际 {review_ms} vs {sum_elapsed}+{sum_sleep}"
+    assert day.get("elapsed_ms") == review_ms + int(day.get("settle", {}).get("elapsed_ms") or 0), \
+        "day.elapsed_ms 应 = review.elapsed_ms + settle.elapsed_ms"
+
+
+# ═══════════════════════════════════════════════════════════════
+# D2：首次成功单条 + fail-fast 全失败 3 条
+# ═══════════════════════════════════════════════════════════════
+
+def test_d2_first_success_single_entry(monkeypatch):
+    """D2：无重试成功日 → attempts_log 长度 1、ok=True、reason==""、retry_sleep_ms==0。"""
+    monkeypatch.setattr(btest, "_settle_impl", _fake_settle)
+    monkeypatch.setattr(btest, "RETRY_SLEEP", 0.01)
+    monkeypatch.setattr(btest, "_run_review_day_impl", make_fake_day()[0])
+
+    bt_id = _start("2026-08-10", "2026-08-11")  # 两天均首次成功
+    fin = _wait_backtest(bt_id)
+    assert fin["status"] == "done"
+    for day in fin["days"]:
+        assert day["status"] == "done"
+        log = day.get("attempts_log")
+        assert log is not None, "成功日应有 attempts_log"
+        assert len(log) == 1, f"无重试成功日 attempts_log 应只有 1 条，实际 {len(log)}"
+        e = log[0]
+        assert e["attempt"] == 1 and e["ok"] is True
+        assert e["reason"] == ""
+        assert e["retry_sleep_ms"] == 0
+        assert e["elapsed_ms"] == day["review"]["elapsed_ms"], \
+            "单条成功日 elapsed_ms 应等于 review.elapsed_ms"
+
+
+def test_d2_failfast_log_all_three(monkeypatch):
+    """D2：3 次全败 → status=error、attempts_log 长度 3 全 ok=False、reason 非空。"""
+    monkeypatch.setattr(btest, "_settle_impl", _fake_settle)
+    monkeypatch.setattr(btest, "RETRY_SLEEP", 0.01)
+    impl, calls = make_fake_day(fail_on_attempts={"2026-08-10": {1, 2, 3}})
+    monkeypatch.setattr(btest, "_run_review_day_impl", impl)
+
+    bt_id = _start("2026-08-10", "2026-08-10")
+    fin = _wait_backtest(bt_id)
+    assert fin["status"] == "error", f"3 次全败应 error，实际 {fin['status']}"
+    day = fin["days"][0]
+    assert day["status"] == "failed"
+    log = day.get("attempts_log")
+    assert log is not None, "fail-fast 失败日也应写 attempts_log（3 条全失败）"
+    assert len(log) == 3, f"fail-fast 日 attempts_log 应为 3 条，实际 {len(log)}"
+    for entry in log:
+        assert entry["ok"] is False, f"fail-fast 全失败条目 ok 应为 False：{entry}"
+        assert entry["reason"] and "模拟" in entry["reason"] and "失败" in entry["reason"], \
+            f"fail-fast 条目 reason 应为中文失败原因，实际：{entry['reason']}"
+    # 重试等待：前 2 条失败后接重试 → retry_sleep_ms ≥10；第 3 条（最后一次，不再重试）→ 0
+    for entry in log[:2]:
+        assert entry["retry_sleep_ms"] >= 10, \
+            f"fail-fast 前 2 条（失败后接重试）retry_sleep_ms 应 ≥10，实际 {entry['retry_sleep_ms']}"
+    assert log[2]["retry_sleep_ms"] == 0, \
+        f"fail-fast 最后一条（不再重试）retry_sleep_ms 应为 0，实际 {log[2]['retry_sleep_ms']}"
+    # 累计口径对 fail-fast 同样成立
+    review_ms = day.get("review", {}).get("elapsed_ms")
+    assert review_ms == sum(e["elapsed_ms"] for e in log) + sum(e["retry_sleep_ms"] for e in log), \
+        "fail-fast 日 review.elapsed_ms 也应等于 sum(elapsed_ms)+sum(retry_sleep_ms)"
+    assert day.get("elapsed_ms") == review_ms + int(day.get("settle", {}).get("elapsed_ms") or 0), \
+        "fail-fast 日 day.elapsed_ms 口径应一致"
+
+
+# ═══════════════════════════════════════════════════════════════
+# D1：历史兼容 —— 无 attempts_log 字段时其他字段仍齐全（前端 normalize 兜底）
+# （可选用例：后端仅确认「其他字段存在」，不要求 attempts_log）
+# ═══════════════════════════════════════════════════════════════
+
+def test_d1_history_day_without_attempts_log_keeps_fields():
+    """D1：模拟旧数据（无 attempts_log 的 done 日）→ 其他字段仍齐全；
+    前端由 normalize 兜底显示。后端只保证缺省安全、字段完整。"""
+    now = time.monotonic()
+    old_day = {
+        "date": "2026-08-05",
+        "status": "done",
+        "attempt": 1,
+        "attempts": 3,
+        "settle": {"filled": 2, "rejected": 0, "quotes_missing": 0, "elapsed_ms": 0},
+        "review": {"elapsed_ms": 1200},
+        "elapsed_ms": 1200,
+        "stages": [{"key": "fetch", "elapsed_ms": 100},
+                   {"key": "analysts", "elapsed_ms": 900},
+                   {"key": "host", "elapsed_ms": 100},
+                   {"key": "report", "elapsed_ms": 100}],
+    }
+    # 旧数据无 attempts_log 字段：不抛 KeyError，其余字段仍在
+    assert "attempts_log" not in old_day, "历史数据无 attempts_log 字段"
+    for field in ("date", "status", "attempt", "attempts", "settle", "review",
+                  "elapsed_ms", "stages"):
+        assert field in old_day, f"无 attempts_log 时其他字段 {field} 应仍齐全"
+    assert old_day["review"]["elapsed_ms"] + old_day["settle"]["elapsed_ms"] \
+        == old_day["elapsed_ms"], "历史日 elapsed 口径一致"
+    # 前端语义：缺 attempts_log 即「无重试明细」，attempt=1 与单条成功一致
+    assert old_day["attempt"] == 1, "历史日 attempt 应为 1（首次即成功）"

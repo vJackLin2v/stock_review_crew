@@ -2793,6 +2793,91 @@ html[data-font="xlarge"] body { font-size: 17px; }
 }
 .bt-error-title { font-weight: 700; }
 
+/* 每天明细：当天已耗时总览 + 明细表格 + 重试明细表 */
+.bt-total-overview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 8px 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(104, 89, 207, 0.1), rgba(92, 124, 250, 0.06));
+  border: 1px solid rgba(104, 89, 207, 0.2);
+}
+.bt-total-big { display: flex; flex-direction: column; }
+.bt-total-label { font-size: 11.5px; font-weight: 700; color: var(--text-2); letter-spacing: 0.4px; }
+.bt-total-value {
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.15;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.bt-total-split { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12.5px; color: var(--text-2); }
+.bt-total-num { color: var(--text); font-variant-numeric: tabular-nums; margin-left: 3px; }
+
+.bt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 4px;
+}
+.bt-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-3);
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border-soft);
+  letter-spacing: 0.4px;
+}
+.bt-table td { padding: 3px 6px; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
+.bt-table tbody tr:last-child td { border-bottom: none; }
+.bt-cell-proj { position: relative; min-width: 130px; }
+.bt-table-ticks {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: 3px;
+  height: 4px;
+  background: var(--bg-soft);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.bt-table-tick { height: 100%; border-radius: 99px; transition: width .25s ease; }
+.bt-cell-proj .bt-bar-label { display: block; padding: 3px 0 1px; }
+.bt-cell-pct { color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; width: 60px; }
+.bt-table .bt-cell-ms { text-align: right; white-space: nowrap; width: 110px; }
+
+.bt-retry-block { margin-top: 12px; }
+.bt-retry-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.bt-retry-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-3);
+  padding: 6px 8px;
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border-soft);
+  letter-spacing: 0.4px;
+}
+.bt-retry-table td { padding: 6px 8px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+.bt-retry-table tbody tr:last-child td { border-bottom: none; }
+.bt-retry-fail-row { background: rgba(224, 49, 49, 0.04); }
+.bt-retry-result { display: inline-flex; padding: 0 8px; border-radius: 99px; font-size: 11.5px; font-weight: 700; line-height: 1.7; }
+.bt-retry-result.ok { background: rgba(12, 166, 120, 0.12); color: var(--down); }
+.bt-retry-result.fail { background: rgba(224, 49, 49, 0.12); color: var(--up); }
+.bt-retry-reason { color: var(--up); word-break: break-word; }
+
 /* 空态 / 历史 */
 .bt-empty-state { text-align: center; padding: 40px 20px; }
 .bt-empty-title { font-size: 15px; font-weight: 700; color: var(--text-2); }

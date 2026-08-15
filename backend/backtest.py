@@ -288,6 +288,8 @@ def _run_one_day(bt: dict, day_index: int) -> None:
 
     # 当天 review 累计耗时：所有尝试（含失败与重试间隔）都计入，避免重试过的天被低估
     review_total_ms = 0
+    # 每次尝试一条记录（成功/失败都写，落盘）：attempt/ok/reason/elapsed_ms/retry_sleep_ms
+    attempts_log: list[dict] = []
     for attempt in range(1, MAX_ATTEMPTS + 1):
         day["attempt"] = attempt
         # 修复 bug：attempts 应为固定上限 MAX_ATTEMPTS（3），原错写成 attempt 当前次数
@@ -303,19 +305,31 @@ def _run_one_day(bt: dict, day_index: int) -> None:
         except Exception as exc:  # noqa: BLE001 - DataValidationError 等一律按单日失败处理
             logger.warning("[backtest] %s 第 %d 次失败：%s", date_str, attempt, exc)
             last_error = str(exc)
+            elapsed_ms = int((time.monotonic() - _t1) * 1000)
+            # 该次失败后重试等待：最后一次（不再重试）为 0
+            retry_sleep_ms = int(RETRY_SLEEP * 1000) if attempt < MAX_ATTEMPTS else 0
             # 本次尝试耗时计入累计（失败不算命中）
-            review_total_ms += int((time.monotonic() - _t1) * 1000)
+            review_total_ms += elapsed_ms
+            attempts_log.append({
+                "attempt": attempt, "ok": False, "reason": last_error,
+                "elapsed_ms": elapsed_ms, "retry_sleep_ms": retry_sleep_ms,
+            })
             if attempt < MAX_ATTEMPTS:
                 _update_current("review", "失败准备重试", 0.0, persist=True)
                 # 重试间隔等待也计入当天统计时间
                 time.sleep(RETRY_SLEEP)
-                review_total_ms += int(RETRY_SLEEP * 1000)
+                review_total_ms += retry_sleep_ms
             continue
         review_ms = int((time.monotonic() - _t1) * 1000)
         # 校验产物（对齐 review_batch 口径）；不合格删记录重跑
         ok, reasons = validate_run_product(date_str)
         if not ok:
             last_error = "；".join(reasons)
+            retry_sleep_ms = int(RETRY_SLEEP * 1000) if attempt < MAX_ATTEMPTS else 0
+            attempts_log.append({
+                "attempt": attempt, "ok": False, "reason": last_error,
+                "elapsed_ms": review_ms, "retry_sleep_ms": retry_sleep_ms,
+            })
             # 产物不合格视为单日失败（重跑覆盖写入，交付时再校验）
             try:
                 from stock_review_crew.storage import reviews as reviews_store
@@ -329,13 +343,18 @@ def _run_one_day(bt: dict, day_index: int) -> None:
                 _update_current("review", last_error, 0.0, persist=True)
                 # 重试间隔等待也计入当天统计时间
                 time.sleep(RETRY_SLEEP)
-                review_total_ms += int(RETRY_SLEEP * 1000)
+                review_total_ms += retry_sleep_ms
                 continue
             break
 
         # 成功：本次尝试耗时计入累计，当天 review 总耗时 = 各次尝试（含失败/重试）之和
         review_total_ms += review_ms
+        attempts_log.append({
+            "attempt": attempt, "ok": True, "reason": "",
+            "elapsed_ms": review_ms, "retry_sleep_ms": 0,
+        })
         day["status"] = "done"
+        day["attempts_log"] = attempts_log
         day["elapsed_ms"] = review_total_ms + int(settle_result.get("elapsed_ms") or 0)
         day["review"] = {"elapsed_ms": review_total_ms}
         day["stages"] = _build_stages(result)
@@ -348,6 +367,7 @@ def _run_one_day(bt: dict, day_index: int) -> None:
     if day["status"] == "running":
         day["status"] = "failed"
         day["error"] = last_error or "单日复盘失败"
+        day["attempts_log"] = attempts_log
         # fail-fast：累计全部尝试耗时（含失败与重试间隔），前端折线/明细不再低估
         day["elapsed_ms"] = review_total_ms + int(settle_result.get("elapsed_ms") or 0)
         day["review"] = {"elapsed_ms": review_total_ms}
