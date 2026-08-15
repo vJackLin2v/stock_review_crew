@@ -15,12 +15,16 @@ import { Chart } from "./Charts";
 const ACCENT = "#6859cf";
 const TEXT2 = "#7a7f87";
 
-// 阶段 key → 中文（固定：fetch / analysts / host / report）
+// 阶段 key → 中文（固定：settle / fetch / analysts / host / report / review / analyst / error）
 const STAGE_LABELS = {
+  settle: "撮合",
   fetch: "取数",
   analysts: "分析师",
   host: "主持人",
   report: "报告",
+  review: "单日复盘",
+  analyst: "分析师",
+  error: "失败",
 };
 const STAGE_ORDER = ["fetch", "analysts", "host", "report"];
 
@@ -140,7 +144,7 @@ function DayDetail({ day }) {
 }
 
 // 每天一行（可展开）
-function DayRow({ day, isCurrent }) {
+function DayRow({ day, isCurrent, liveCurrent, liveNodeElapsed }) {
   const [open, setOpen] = useState(false);
   const status = day.status || "pending";
   const dayMs = num(day.elapsed_ms, NaN);
@@ -148,9 +152,14 @@ function DayRow({ day, isCurrent }) {
   const filled = num(settle.filled, NaN);
   const rejected = num(settle.rejected, NaN);
   const reviewMs = num(day.review && day.review.elapsed_ms, NaN);
+  const attemptN = num(day.attempt, NaN);
+  const attemptsN = num(day.attempts, NaN);
   const hasDetail =
     Number.isFinite(reviewMs) ||
     (Array.isArray(day.stages) && day.stages.length > 0);
+  // 进行中且当前节点属于该日 → 显示实时阶段/消息/耗时
+  const cur =
+    isCurrent && liveCurrent && liveCurrent.date === (day.date || "") ? liveCurrent : null;
   return (
     <div
       className={`bt-day${isCurrent ? " current" : ""}${status === "failed" ? " failed" : ""}`}
@@ -177,7 +186,26 @@ function DayRow({ day, isCurrent }) {
         </span>
         <span className="bt-cell bt-cell-ms">{fmtMS(reviewMs)}</span>
         <span className="bt-cell bt-cell-reason">
-          {day.error ? <span className="bt-fail-reason">{day.error}</span> : "—"}
+          {status === "running" && cur ? (
+            <span className="bt-node-info">
+              <span className="bt-node-stage">
+                {STAGE_LABELS[cur.stage] || stageLabel(cur.stage) || cur.stage}
+              </span>
+              {cur.message ? <span className="bt-node-msg">{cur.message}</span> : null}
+              <span className="bt-node-elapsed">已耗时 {fmtMS(liveNodeElapsed)}</span>
+            </span>
+          ) : status === "done" && Number.isFinite(attemptsN) && attemptsN > 1 ? (
+            <span className="bt-retry-badge" title="经历过失败重试">重试 {attemptsN - 1} 次</span>
+          ) : day.error ? (
+            <span className="bt-fail-reason">
+              {Number.isFinite(attemptN) && Number.isFinite(attemptsN) && attemptsN > 1
+                ? `第 ${attemptN}/${attemptsN} 次尝试后失败：`
+                : ""}
+              {day.error}
+            </span>
+          ) : (
+            "—"
+          )}
         </span>
         <span className="bt-row-caret">{hasDetail ? (open ? "▾" : "▸") : ""}</span>
       </button>
@@ -307,6 +335,8 @@ export default function BacktestView({ onBack }) {
   const [polling, setPolling] = useState(false);
   const pollRef = useRef(null);
   const [history, setHistory] = useState({ runs: [], loading: true, error: "" });
+  // 节点已耗时本地 1s tick（轮询快照为基准；快照更新时重置）
+  const [tick, setTick] = useState(0);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -334,6 +364,14 @@ export default function BacktestView({ onBack }) {
     loadHistory();
     return () => stopPolling();
   }, [loadHistory, stopPolling]);
+
+  // 节点已耗时：运行中每秒自增 tick 实时跳动；bt 快照（每次轮询）更新时重置基准
+  useEffect(() => {
+    setTick(0);
+    if (!bt || !bt.isRunning || !bt.current) return undefined;
+    const iv = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(iv);
+  }, [bt]);
 
   // 轮询 GET /api/backtest/{id}（2s），终态停止
   const beginPolling = useCallback(
@@ -431,6 +469,17 @@ export default function BacktestView({ onBack }) {
   const totalMs = num(bt && bt.total_elapsed_ms, NaN);
   const currentDate = (bt && bt.current && bt.current.date) || "";
   const currentStage = (bt && bt.current && bt.current.stage) || "";
+  // 运行中且有当前节点（非终态）才展示耗时/尝试/警示/消息
+  const isRunningNode = !!(bt && bt.isRunning && currentStage);
+  const cur = (bt && bt.current) || {};
+  const curAttempt = num(cur.attempt, NaN);
+  const curAttempts = num(cur.attempts, NaN);
+  const curLastError = (cur && cur.last_error) || "";
+  const curMessage = (cur && cur.message) || "";
+  // 节点已耗时实时跳动 = 轮询快照 elapsed_ms + 本地 1s tick（无快照值则 NaN → 「—」）
+  const nodeElapsedLive = Number.isFinite(cur.elapsed_ms)
+    ? cur.elapsed_ms + tick * 1000
+    : NaN;
   // 折线图用已完成/失败/跳过的天（进行中/待处理无实测耗时）
   const chartDays = useMemo(
     () =>
@@ -535,7 +584,23 @@ export default function BacktestView({ onBack }) {
             {currentStage ? (
               <span>当前阶段：<b>{STAGE_LABELS[currentStage] || stageLabel(currentStage)}</b></span>
             ) : null}
+            {isRunningNode ? (
+              <span>节点已耗时：<b className="bt-node-elapsed">{fmtMS(nodeElapsedLive)}</b></span>
+            ) : null}
             <span>总耗时：<b>{fmtMS(totalMs)}</b></span>
+            {isRunningNode && Number.isFinite(curAttempt) && curAttempt > 1 ? (
+              <span className="bt-attempt-badge" title={`本轮第 ${curAttempt} 次尝试（上限 ${Number.isFinite(curAttempts) ? curAttempts : "—"}）`}>
+                第 {curAttempt}/{Number.isFinite(curAttempts) ? curAttempts : "—"} 次尝试
+              </span>
+            ) : null}
+            {isRunningNode && curLastError ? (
+              <div className="bt-last-error-warning">
+                <b>上次失败：</b>{curLastError}，正在重试
+              </div>
+            ) : null}
+            {isRunningNode && curMessage ? (
+              <span className="bt-node-msg-top">节点消息：<b>{curMessage}</b></span>
+            ) : null}
           </div>
 
           {/* 每天耗时折线图 */}
@@ -553,6 +618,8 @@ export default function BacktestView({ onBack }) {
                   key={d.date || `${d.status}-${Math.random()}`}
                   day={d}
                   isCurrent={bt.isRunning && d.status === "running"}
+                  liveCurrent={bt.current}
+                  liveNodeElapsed={nodeElapsedLive}
                 />
               ))}
             </div>
