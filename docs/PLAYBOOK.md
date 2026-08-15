@@ -837,3 +837,31 @@
   整图回放/无缓存兼容/强制刷新/确定性/模式不符回退/预热脚本）；全量 744 passed / 53 skipped。
   教训：**给已有测试逻辑加「读取已落盘产物」的旁路时，必须同步考虑该产物在本进程的重现性**，
   用 per-test 数据根隔离根除「跨用例副作用」，不要靠临时禁用缓存打补丁。
+
+### [2026-08-16] 闭包 nonlocal 漏声明 + 进度回调新增「分析师子事件」污染 job.stage（回测耗时采集）
+- 现象：把 `backend/jobs.py::_run_review_job` 抽成可复用 `run_review_day(date, mode, max_rounds,
+  trace, progress_cb, timing_cb)`（含阶段/分析师耗时采集）后，单日复盘 job 终态 `stage` 不回归
+  「done」（停在 fetch）；`_new_timing_tracker` 的 `track()` 对阶段事件静默抛异常
+  （UnboundLocalError），导致 `stage_timings` 恒空、`progress_cb` 收不到阶段事件（被 `_emit`
+  的 try/except 吞掉）。
+- 原因（两个坑叠加）：
+  1. **闭包 nonlocal 漏声明**：`track` 内既 `stage != _active` 读又 `_active = stage` 写 →
+     Python 当局部变量 → 读取报 UnboundLocalError；`nonlocal` 只在 `_close` 里声明了，
+     `track` 里漏了。**凡内层函数既读又写外层变量，必须在每个写它的函数里都 nonlocal。**
+  2. **进度「子事件」污染 job.stage**：graph 新增「分析师 started/finished」子事件（stage
+     用 `analyst`、meta 带 skill_id）后，单日 job 的 `_progress_cb(job_id)` 把
+     `JOBS[job_id]["stage"]` 覆盖成 analyst；且该子事件以 `_emit(..., meta=...)` 关键字传参，
+     `test_r2_analysts_total_5_and_progress` 直接 monkeypatch `graph._emit` 为 3 参 lambda
+     → 4 参调用 TypeError（非 `_emit` 内部，无法被吞）直接失败。
+- 解决：
+  1. `track` 加 `nonlocal _active, _active_start`；
+  2. `_progress_cb` 对 `meta.type == "analyst"` 子事件直接忽略（单日 job 不采集、不污染 stage）；
+  3. **分析师子事件默认关（opt-in）**：graph 新增 `_analyst_events_var` ContextVar +
+     `set_progress_callback(callback, analyst_events=False)`；`_run_analysts` 仅在
+     `analyst_events=True`（回测编排器 / run_review_day 显式开启）时发射该子事件——
+     既有 3 参回调、直接用 3 参 lambda 替换 `_emit` 的测试零改动。
+- 备注/复现：`test_review_full_chain` 从 stage=analyst 到 stage=done；
+  `run_review_day` 的 stage_timings 从空到 `{fetch,news,analysts,host,report}`；
+  `test_r2_analysts_total_5_and_progress` 恢复全绿。教训：**给共享进度回调加「子事件」维度时，
+  要么让不关心的调用方显式跳过（_progress_cb ignore），要么默认关闭、需要方 opt-in
+  （analyst_events 开关），避免新事件破坏既有 3 参回调/替换 _emit 的测试。**
