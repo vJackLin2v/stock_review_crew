@@ -903,3 +903,24 @@
 - 备注/复现：验收新增 test_e1_llm_invoke_timeout_200 / test_e2_llm_timeout_failfast_
   two_attempts / test_e3_data_failure_keeps_three_attempts；tests/test_backtest_live_diag.py
   15 全绿。
+
+### [2026-08-16] 坏快照事故链：根语义不一致 + 指数取数不稳定 + lite 快速模式
+- 现象 1（坏快照）：7-1 回测失败「index_trend 数据缺失」——8-15 14:03 一次失败运行
+  （指数取数超时 >45s）把好快照覆盖成坏版；离线回放命中坏快照 → validate_data_node 失败
+  （错误消息误导「检查网络」）。修复：删坏快照 + 批量预热（7 个日期 7/7 OK）+ 错误消息
+  区分「实时失败 vs 快照缺失」（graph.validate_data_node 按 snapshot.source=="离线回放"）。
+- 现象 2（根语义不一致）：预热脚本设 `STOCK_REVIEW_DATA_DIR` 后好快照写到 `data/{date}/`
+  （少 `reviews/` 一级）——`reviews_root()` 的 env override 分支 `return Path(override)`
+  （把 env 当 reviews 根），而 backtest/accounts/quotes 等全把 env 当**数据根**再拼子目录。
+  修复：统一 `Path(override)/"reviews"` + 同步 5 处旧语义 fixture + `scripts/preheat_reviews.py`。
+  教训：**同一 env 的语义必须全仓一致；scripts/ 是「用 env 隔离」的高危路径，改根逻辑必须
+  同步排查 scripts/**。
+- 现象 3（lite 快速模式两个坑）：
+  ① `default_initial_state` 加 `lite` 键会被 LangGraph 丢弃（`ReviewState` 未声明该字段，
+  invoke 忽略额外键）→ host/report 仍调 LLM。修复：`_lite_var` ContextVar +
+  `set_lite_context(flag)` 上下文管理器包裹 invoke（host/report 读
+  `_lite_active() or state.get("lite")` 双保险）。
+  ② **前端 `api.js::startBacktest` 构造固定 body 会丢弃新增参数**（lite）——加新参数必须
+  同步改 api.js 请求体 + normalize.js params 映射，否则「checkbox 勾了但后端收不到」。
+- 备注/复现：全量 818 passed / 53 skipped；build + 冒烟（`.tmp/smoke_final.py`）全过；
+  失败历史回测清理（删 error/cancelled 目录，history 从 manifest 重建）；lite 验收 F1/F2/F3。
