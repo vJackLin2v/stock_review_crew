@@ -924,3 +924,14 @@
   同步改 api.js 请求体 + normalize.js params 映射，否则「checkbox 勾了但后端收不到」。
 - 备注/复现：全量 818 passed / 53 skipped；build + 冒烟（`.tmp/smoke_final.py`）全过；
   失败历史回测清理（删 error/cancelled 目录，history 从 manifest 重建）；lite 验收 F1/F2/F3。
+
+### [2026-08-16] 回测断点续跑（resume）实现要点与并行 TEST 跑测污染
+- 现象：本实现代理（只改实现，TEST 并行改 tests）跑合并后的 test_backtest_live_diag.py 时，
+  test_a3_retry 偶发失败（calls 混入另一天的日期，5 次 vs 期望 3）；单独复跑该用例、以及
+  三文件合跑均全绿（70 passed）。属并行 pytest 进程 / 遗留后台线程的跨测试污染，非逻辑 bug。
+- 原因：resume 新用例（H1/H3）会启动后台 _run_loop 线程并 sleep 拉长 running 窗；若与
+  其他测试/另一 pytest 进程共享数据隔离时序，可能串扰静态函数（_start 返回不同区间）。
+- 解决：三文件合跑确定性通过；单独复跑区分「真 bug」与「环境时序放大」（PLAYBOOK 第 2026-08-12
+  watchlist 条目同款口诀）。resume 单 running 互斥、不重置账户、保留已 done 天产物是语义核心。
+- 备注/复现：resume 验收用 POST /api/backtest/{id}/resume；delete_review keep_snapshot 是
+  _run_one_day 产物校验失败清理改用的防复发路径（H4/H6）。

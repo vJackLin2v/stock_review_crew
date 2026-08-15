@@ -606,3 +606,21 @@
 > ⏳ **下一批（用户已确认口径，待启动）**：首页 4 点——① 去掉「今日数据」个股行情查询卡（个股详情保留）；
 >   ② 去掉纳斯达克卡片；③ 市场天气增强敏感度（九档，每100家跌5%以上扣5分/跌7%以上扣10分，允许负数、
 >   下限-100，需数据层 finer 分档或「跌停」作 7%+ 代理）；④ 观察列表加 margin-top（与风格坐标粘连）。
+
+2026-08-16 回测断点续跑（resume）+ 产物校验失败保留行情快照（requirements-backtest-resume）：
+1. **backend/backtest.py**：_run_loop(bt, start_idx=0) 循环从 start_idx 起步（续跑起点）；
+   新增 esume_backtest(bt_id)（单 running 互斥 409 / done 409 / 找首个非 done 日 / 重置该日起为
+   pending / status=running + finished_at=None + days_done 重算 / **不重置账户** / daemon 线程续跑；
+   内存 BACKTESTS 优先，否则从 manifest+progress.json 磁盘重建）；_run_one_day 产物校验失败
+   delete_review 改 keep_snapshot=True（防复发，好快照保留）。
+2. **backend/routes_backtest.py**：POST /api/backtest/{id}/resume → resume_backtest。
+3. **reviews.py**：delete_review(date, time=None, *, keep_snapshot=False)——True 时删整目录后
+   恢复 market_data.json（保留行情快照），默认 False 删整份（回归既有）。
+4. **前端**：api.js esumeBacktest(id)；BacktestView.jsx HistoryList error/cancelled 项加
+   「续跑」小按钮（onResume，独立按钮不破坏整行 onClick），handleResume → resumeBacktest →
+   getBacktest 快照 → beginPolling。
+5. **验证**：test_backtest + test_backtest_live_diag + test_storage_reviews == **70 passed / 0 failed**
+   （含 H1/H2/H3/H4/H6 共 6 个 H 用例全绿）；手动 .tmp 脚本构造 error 回测 → resume_from=失败日 →
+   续跑全 done；delete_review keep_snapshot 快照仍在；前端 
+pm run build 通过（bundle 含 /resume、
+   续跑/Ui）。H5 前端按钮 + build 通过。真实续跑 bb45（从 5-08）需用户确认后另跑。

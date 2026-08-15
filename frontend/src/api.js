@@ -805,6 +805,32 @@ export async function cancelBacktest(id) {
   return await res.json();
 }
 
+// POST /api/backtest/{id}/resume → {ok, backtest_id, resume_from}
+// 断点续跑（requirements-backtest-resume）：失败/取消的 error 回测从首个非 done 日续跑。
+export async function resumeBacktest(id) {
+  const key = String(id || "").trim();
+  if (key && mockBacktests.has(key)) {
+    const bt = mockBacktests.get(key);
+    bt.cancelled = false;
+    bt.done = 0; // DEV mock：从头续跑
+    return { ok: true, backtest_id: key, resume_from: bt.start || "" };
+  }
+  let res;
+  try {
+    res = await fetchWithTimeout(`/api/backtest/${encodeURIComponent(key)}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+  } catch (err) {
+    if (canFallback()) return { ok: true, backtest_id: key, resume_from: "" };
+    if (err instanceof ApiError) throw err;
+    throw new ApiError("无法连接后端服务，请确认服务已启动");
+  }
+  if (!res.ok) throw await errorFrom(res, "续跑回测失败");
+  return await res.json();
+}
+
 // GET /api/backtest/history → {runs:[...]}（created_at 倒序，上限 20）
 export async function getBacktestHistory() {
   try {

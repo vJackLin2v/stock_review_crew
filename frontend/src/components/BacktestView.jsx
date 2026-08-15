@@ -389,7 +389,7 @@ function DailyTrendChart({ days }) {
   return <Chart option={option} height={280} emptyText="暂无每天耗时数据" />;
 }
 
-function HistoryList({ history, onOpen, loading, error }) {
+function HistoryList({ history, onOpen, onResume, loading, error }) {
   const runs = (history && history.runs) || [];
   if (loading) {
     return <div className="bt-hist-empty">正在加载历史回测…</div>;
@@ -402,25 +402,48 @@ function HistoryList({ history, onOpen, loading, error }) {
   }
   return (
     <div className="bt-hist">
-      {runs.map((r, i) => (
-        <button
-          key={i}
-          type="button"
-          className="bt-hist-item"
-          onClick={() => onOpen(r.id)}
-          title={`${r.start} ~ ${r.end} · ${BT_TOP_STATUS[r.status] || r.status}`}
-        >
-          <span className="bt-hist-range">
-            {r.start} ~ {r.end}
-          </span>
-          <span className={`bt-status ${STATUS_CLASS[r.status] || ""}`}>
-            {BT_TOP_STATUS[r.status] || r.status}
-          </span>
-          <span className="bt-hist-meta">
-            {r.days_done}/{r.days_total} 天 · {fmtMS(r.total_elapsed_ms)}
-          </span>
-        </button>
-      ))}
+      {runs.map((r, i) => {
+        const resumable = r.status === "error" || r.status === "cancelled";
+        const inner = (
+          <button
+            type="button"
+            className="bt-hist-item"
+            onClick={() => onOpen(r.id)}
+            title={`${r.start} ~ ${r.end} · ${BT_TOP_STATUS[r.status] || r.status}`}
+          >
+            <span className="bt-hist-range">
+              {r.start} ~ {r.end}
+            </span>
+            <span className={`bt-status ${STATUS_CLASS[r.status] || ""}`}>
+              {BT_TOP_STATUS[r.status] || r.status}
+            </span>
+            <span className="bt-hist-meta">
+              {r.days_done}/{r.days_total} 天 · {fmtMS(r.total_elapsed_ms)}
+            </span>
+          </button>
+        );
+        // 断点续跑（H5）：仅 error/cancelled 历史项渲染「续跑」小按钮；
+        // 单独处理点击，避免破坏整行 onClick（打开详情）行为。
+        // 布局用内联 flex 行（不新增全局样式，保持改动面最小）；按钮复用既有 btn 按钮样式。
+        if (!resumable) {
+          return <div key={i}>{inner}</div>;
+        }
+        const rowStyle = { display: "flex", alignItems: "center", gap: 8, paddingRight: 8 };
+        const growStyle = { flex: 1, minWidth: 0 };
+        return (
+          <div key={i} className="bt-hist-item-row" style={rowStyle}>
+            <div style={growStyle}>{inner}</div>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={() => onResume && onResume(r.id)}
+              title="从此前失败/取消的位置继续回测"
+            >
+              续跑
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -583,6 +606,24 @@ export default function BacktestView({ onBack }) {
       }
     },
     [stopPolling, beginPolling]
+  );
+
+  const handleResume = useCallback(
+    async (id) => {
+      setBtError("");
+      try {
+        const res = await api.resumeBacktest(id);
+        const bid = res && (res.backtest_id || res.id || id);
+        // 续跑后从磁盘快照恢复轮询（简单可靠）：拿最新快照后 beginPolling
+        const snap = await api.getBacktest(bid);
+        const norm = normalizeBacktest(snap);
+        beginPolling(bid, norm);
+        if (pollRef.current) setPolling(true);
+      } catch (err) {
+        setBtError((err && err.message) || "续跑回测失败");
+      }
+    },
+    [beginPolling]
   );
 
   const total = num(bt && bt.days_total, NaN);
@@ -773,7 +814,7 @@ export default function BacktestView({ onBack }) {
           <h2 className="card-title">历史回测</h2>
           <button className="btn btn-ghost btn-sm" onClick={loadHistory}>刷新</button>
         </div>
-        <HistoryList history={history} onOpen={handleOpenHistory} loading={history.loading} error={history.error} />
+        <HistoryList history={history} onOpen={handleOpenHistory} onResume={handleResume} loading={history.loading} error={history.error} />
       </div>
     </div>
   );

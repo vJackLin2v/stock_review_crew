@@ -19,7 +19,8 @@
   （每次阶段/天变化时写）；尊重 STOCK_REVIEW_DATA_DIR 隔离；
 - 历史：list_backtests() 读 data/backtests/*/manifest.json，按 created_at 倒序，
   上限 20 条；
-- 断点续跑不做（回测是重跑性质）。
+- 断点续跑（resume）：失败的 error 回测可从首个非 done 日续跑，保留已 done 天
+  产物与账户状态（_run_loop start_idx + resume_backtest）。
 
 所有面向用户的投资内容必须带「仅供参考，不构成投资建议」。
 """
@@ -357,7 +358,10 @@ def _run_one_day(bt: dict, day_index: int) -> None:
             try:
                 from stock_review_crew.storage import reviews as reviews_store
 
-                reviews_store.delete_review(date_str)
+                # 防复发（requirements-backtest-resume H4）：产物校验失败清理时**保留行情快照**
+                # （market_data.json）——好快照是离线回放的预热缓存，误删后会破坏离线回放
+                # （回放 miss → 实时取数 → 保存坏快照 → 取数校验失败），只删产物不删快照。
+                reviews_store.delete_review(date_str, keep_snapshot=True)
             except Exception:  # noqa: BLE001
                 pass
             # 本次尝试耗时计入累计（产物不合格也算一次失败尝试）
@@ -455,10 +459,14 @@ def _persist_day_and_meta(bt: dict) -> None:
     _persist(bt)
 
 
-def _run_loop(bt: dict) -> None:
-    """后台逐日循环：settle(prev) → review → 校验；fail-fast / cancel。"""
+def _run_loop(bt: dict, start_idx: int = 0) -> None:
+    """后台逐日循环：settle(prev) → review → 校验；fail-fast / cancel。
+
+    start_idx：断点续跑（resume）从该日索引开始（此前 done 的天保留不动），
+    默认 0 为全新回测。
+    """
     try:
-        for i in range(len(bt["days"])):
+        for i in range(start_idx, len(bt["days"])):
             with _lock:
                 if bt["_cancel"]:
                     bt["status"] = "cancelled"
@@ -576,6 +584,124 @@ def cancel_backtest(bt_id: str) -> dict:
     with _lock:
         bt["_cancel"] = True
     return {"ok": True}
+
+
+def _load_backtest_from_disk(bt_id: str) -> Optional[dict]:
+    """从落盘（manifest.json + progress.json）重建回测对象，供断点续跑。
+
+    磁盘进度是「公开字段」persist 的（无 _ 内部字段），重建时补齐
+    id/start/end/params/created_at/finished_at/status/days/current/days_done/
+    days_total/total_elapsed_ms/_cancel=False 等字段。磁盘无 → 返回 None。
+    """
+    p = _run_dir(bt_id) / "progress.json"
+    mf = _run_dir(bt_id) / "manifest.json"
+    if not (p.exists() or mf.exists()):
+        return None
+    data = {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - 磁盘损坏容错
+        pass
+    if not isinstance(data, dict) or not data.get("days"):
+        data = {}
+    params = data.get("params") or {}
+    m = {}
+    try:
+        m = json.loads(mf.read_text(encoding="utf-8")) if mf.exists() else {}
+    except Exception:  # noqa: BLE001
+        m = {}
+    if not isinstance(m, dict):
+        m = {}
+    bt = {
+        "_cancel": False,
+        "id": data.get("id") or m.get("id") or bt_id,
+        "start": data.get("start") or m.get("start") or params.get("start"),
+        "end": data.get("end") or m.get("end") or params.get("end"),
+        "params": params,
+        "created_at": data.get("created_at") or m.get("created_at"),
+        "finished_at": data.get("finished_at") or m.get("finished_at"),
+        "status": str(data.get("status") or m.get("status") or "pending"),
+        "days": data.get("days") or [],
+        "current": data.get("current"),
+        "days_done": int(data.get("days_done") or 0),
+        "days_total": int(data.get("days_total") or len(data.get("days") or [])),
+        "total_elapsed_ms": int(data.get("total_elapsed_ms") or 0),
+    }
+    return bt
+
+
+def resume_backtest(bt_id: str) -> dict:
+    """断点续跑：从首个非 done 的日续跑，保留已 done 天的产物与账户状态。
+
+    语义（requirements-backtest-resume H1）：
+    - 单 running 互斥：已有 running/queued 回测 → 409；
+    - status=done → 409「已完成」；
+    - 找首个 `status != done` 的日索引 start_idx（全 done → 409）；
+    - 重置 days[start_idx:] 为初始 pending（清 error/attempts_log/settle/review/
+      stages/elapsed_ms/attempt/attempts）；
+    - status=running、finished_at=None、_cancel=False、current={首日, queued}、
+      days_done=done 数；落盘；
+    - **不重置模拟账户**（续跑延续已 done 天的账户状态，绝不调用 _reset_accounts）；
+    - 启动 daemon 线程 _run_loop(bt, start_idx)。
+    """
+    with _lock:
+        # 单 running 互斥：任一 running/queued 回测存在即 409（含被续跑的自身之外）
+        for other in BACKTESTS.values():
+            if other.get("status") in ("queued", "running"):
+                raise HTTPException(status_code=409, detail="已有回测运行中")
+        bt = BACKTESTS.get(bt_id)
+    if bt is None:
+        # 内存无 → 从磁盘重建（重启后断点续跑）
+        bt = _load_backtest_from_disk(bt_id)
+    if bt is None:
+        raise HTTPException(status_code=404, detail="回测不存在")
+    if bt.get("status") == "done":
+        raise HTTPException(status_code=409, detail="回测已完成，无需续跑")
+
+    days = bt.get("days") or []
+    start_idx = next(
+        (i for i, d in enumerate(days) if d.get("status") != "done"),
+        None,
+    )
+    if start_idx is None or not days:
+        raise HTTPException(status_code=409, detail="回测已完成，无需续跑")
+
+    # 重置 days[start_idx:] 为初始 pending 态（清产物失败/未完成残留）
+    for i in range(start_idx, len(days)):
+        day = days[i]
+        day["status"] = "pending"
+        day["error"] = None
+        day["attempt"] = 0
+        day["attempts"] = 0
+        day["settle"] = None
+        day["review"] = None
+        day["stages"] = []
+        day["elapsed_ms"] = None
+        day.pop("attempts_log", None)
+
+    bt["status"] = "running"
+    bt["finished_at"] = None
+    bt["_cancel"] = False
+    bt["days_done"] = sum(1 for d in days if d["status"] == "done")
+    bt["days_total"] = len(days)
+    bt["total_elapsed_ms"] = sum(
+        int(d.get("elapsed_ms") or 0) for d in days if d.get("status") == "done"
+    )
+    bt["current"] = {"date": days[start_idx]["date"], "stage": "queued"}
+    with _lock:
+        BACKTESTS[bt_id] = bt
+    _persist(bt)
+    try:
+        threading.Thread(target=_run_loop, args=(bt, start_idx), daemon=True).start()
+    except Exception as exc:  # noqa: BLE001 - 启动失败清理 registry
+        with _lock:
+            BACKTESTS.pop(bt_id, None)
+        raise HTTPException(status_code=500, detail=f"续跑启动失败：{exc}") from exc
+    return {
+        "ok": True,
+        "backtest_id": bt["id"],
+        "resume_from": days[start_idx]["date"],
+    }
 
 
 def get_backtest(bt_id: str) -> dict:

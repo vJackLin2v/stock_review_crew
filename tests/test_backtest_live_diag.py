@@ -979,3 +979,327 @@ def test_f3_lite_off_behavior_unchanged(fake_fetch):
         "非 lite 报告不应含「快速模式」（lite 专属标注不污染普通路径）"
     assert "快速模式" not in "；".join(meta.get("degraded") or []), \
         "非 lite 时 meta.degraded 不应含「快速模式」"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 回测断点续跑（resume）+ 产物校验失败保留行情快照
+# docs/requirements-backtest-resume.md 验收 H1-H6（回测相关 + 快照保留单测）
+#
+# 现状说明：实现代理尚未合入该需求（backend/backtest.py 无 _run_loop 的
+# start_idx、无 resume_backtest；backend/routes_backtest.py 无 resume 路由；
+# reviews.delete_review 无 keep_snapshot；_run_one_day 产物校验失败仍走
+# delete_review 整删）。故本批 H1-H4/H6 用例本应红——红的原因是「实现未就绪」：
+#   H1/H2/H3 → POST /api/backtest/{id}/resume 不存在（404）；
+#   H4       → delete_review(date, keep_snapshot=...) 抛 TypeError；
+#   H6       → _run_one_day 产物校验失败清理后 market_data.json 被删。
+# 实现合并后应全部变绿。
+#
+# 关键设计：
+#   - resume 数据用 2026-08-10(周一)~2026-08-14(周五) 共 5 天，第 3 天=2026-08-12。
+#   - make_resume_fake 用可变 `fail_12` 标志控制「第 3 天原跑失败、续跑成功」，
+#     支持一次 start + 一次 resume 走过两个阶段而返回同一份注入实现。
+# ═══════════════════════════════════════════════════════════════
+
+def make_resume_fake(fail_12: dict) -> tuple[list, list]:
+    """复刻 make_fake_day 但失败行为由 fail_12['fail'] 控制：为真时 2026-08-12
+    全失败，为假时成功；其余日期恒成功。返回 (impl, calls)。"""
+    calls: list[dict] = []
+
+    def impl(date: str, mode: str, max_rounds: int, trace: bool, progress_cb=None):
+        if progress_cb:
+            for st, pct in (("fetch", 1), ("analysts", 20), ("host", 50), ("report", 85)):
+                progress_cb(st, pct, st, None)
+        attempt = sum(1 for c in calls if c["date"] == date) + 1
+        should_fail = date == "2026-08-12" and fail_12.get("fail") and attempt <= 3
+        calls.append({"date": date, "attempt": attempt, "ok": not should_fail})
+        if should_fail:
+            raise RuntimeError("单日复盘模拟失败")
+        _write_products(date)
+        # 每个成功日小睡一会，让 resume 阶段可被轮询到 running 态（done 天保留观察）
+        time.sleep(0.05)
+        return {
+            "meta": {"date": date},
+            "report": "测试报告",
+            "snapshot": {"date": date},
+            "record_id": date,
+            "quality": None,
+            "stage_timings": _stage_timings(),
+            "analyst_timings": _analyst_timings(),
+        }
+
+    return impl, calls
+
+
+def _wait_observing_marked_done(bt_id: str, timeout: float = 30.0) -> dict:
+    """轮询直到出现一个 running 快照并断言 days[0..1] 仍 done；若回测已终局则
+    直接返回终局（仍断言其 done 天被保留，见调用处）。"""
+    deadline = time.monotonic() + timeout
+    last: dict = {}
+    while time.monotonic() < deadline:
+        r = client.get(f"/api/backtest/{bt_id}")
+        assert r.status_code == 200, r.text
+        last = r.json()
+        if last["status"] in ("done", "error", "cancelled"):
+            return last
+        if last["status"] == "running":
+            # 任意一个 running 快照上断言「已 done 天保留」
+            assert last["days"][0]["status"] == "done", \
+                f"续跑中 days[0] 应保持 done，实际 {last['days'][0]['status']}（红：done 天被重置）"
+            assert last["days"][1]["status"] == "done", \
+                f"续跑中 days[1] 应保持 done，实际 {last['days'][1]['status']}（红：done 天被重置）"
+            assert last["days_done"] >= 2, \
+                f"续跑中 days_done 应从已 done 数起算（≥2），实际 {last['days_done']}"
+            return last
+        time.sleep(0.02)
+    raise AssertionError(f"回测未在 {timeout}s 内出现 running 或终局：{last.get('status')}")
+
+
+# ────────────────── H1：resume 从失败日续跑（done 天保留 + 最终全 done） ──────────────────
+
+def test_h1_resume_from_failed_day(monkeypatch):
+    """H1：start 5 天回测、第 3 天(2026-08-12)全败 → status=error、days[0..1]=done、
+    days[2]=failed；POST resume → 200、resume_from=失败日；
+    续跑中 days[0..1] 仍 done、days_done 从 2 起算；续跑后 → done、全 done、days_done==len(days)。"""
+    monkeypatch.setattr(btest, "_settle_impl", _fake_settle)
+    monkeypatch.setattr(btest, "RETRY_SLEEP", 0.01)
+    fail_12 = {"fail": True}
+    impl, calls = make_resume_fake(fail_12)
+    monkeypatch.setattr(btest, "_run_review_day_impl", impl)
+
+    # 原跑：5 天，第 3 天全败 → status=error
+    bt_id = _start("2026-08-10", "2026-08-14")
+    fin = _wait_backtest(bt_id)
+    assert fin["status"] == "error", f"第 3 天全败应 error，实际 {fin['status']}"
+    dates = [d["date"] for d in fin["days"]]
+    assert dates == ["2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14"], \
+        f"交易日序列应为 08-10..08-14 五天，实际 {dates}"
+    assert fin["days"][0]["status"] == "done", "days[0] 应已 done"
+    assert fin["days"][1]["status"] == "done", "days[1] 应已 done"
+    assert fin["days"][2]["status"] == "failed", \
+        f"days[2](2026-08-12) 应 failed，实际 {fin['days'][2]['status']}"
+
+    # 打开续跑开关：第 3 天将被成功重跑（等效「故障恢复」）
+    fail_12["fail"] = False
+
+    # resume → 200、resume_from=失败日
+    r = client.post(f"/api/backtest/{bt_id}/resume")
+    assert r.status_code == 200, \
+        f"resume 应 200（红：实现未合入应 404），实际 {r.status_code} {r.text}"
+    body = r.json()
+    assert body.get("backtest_id") == bt_id, \
+        f"resume 应回传 backtest_id，实际 {body.get('backtest_id')}"
+    assert body.get("resume_from") == "2026-08-12", \
+        f"resume_from 应为失败日 2026-08-12，实际 {body.get('resume_from')}"
+    assert body.get("ok") is True, "resume 响应应含 ok:true"
+
+    # 续跑中：done 天保留、days_done 从已 done 数起算
+    running_or_final = _wait_observing_marked_done(bt_id)
+    if running_or_final.get("status") == "running":
+        assert running_or_final["days"][0]["status"] == "done"
+        assert running_or_final["days"][1]["status"] == "done"
+
+    # 续跑完成：全 done
+    fin2 = _wait_backtest(bt_id)
+    assert fin2["status"] == "done", f"续跑后应 done，实际 {fin2['status']}"
+    assert len(fin2["days"]) == 5
+    assert all(d["status"] == "done" for d in fin2["days"]), \
+        "续跑后全部天应 done"
+    assert fin2["days_done"] == len(fin2["days"]) == 5, \
+        f"续跑后 days_done 应 == len(days)==5，实际 {fin2['days_done']}"
+
+
+# ────────────────── H2：done 回测拒绝 resume ──────────────────
+
+def test_h2_done_resume_rejected(monkeypatch):
+    """H2：已完成回测 resume → 409（中文「已完成」）。"""
+    monkeypatch.setattr(btest, "_settle_impl", _fake_settle)
+    monkeypatch.setattr(btest, "RETRY_SLEEP", 0.01)
+    monkeypatch.setattr(btest, "_run_review_day_impl", make_fake_day()[0])
+
+    bt_id = _start("2026-08-10", "2026-08-11")
+    fin = _wait_backtest(bt_id)
+    assert fin["status"] == "done", f"应先跑完为 done，实际 {fin['status']}"
+
+    r = client.post(f"/api/backtest/{bt_id}/resume")
+    assert r.status_code == 409, \
+        f"done 回测 resume 应 409（红：实现未合入应 404），实际 {r.status_code}"
+    assert "已完成" in str(r.json().get("detail") or {}), \
+        f"409 原因应中文含「已完成」，实际：{r.json()}"
+
+
+# ────────────────── H3：单 running 互斥（续跑运行中再 resume → 409 运行中） ──────────────────
+
+def test_h3_resume_mutex_single_running(monkeypatch):
+    """H3：error 回测 resume 后若仍 running，再 resume（同/另一）→ 409「运行中」。
+    用一个缓慢续跑 impl 拉长 running 窗，成功触发二次 resume 的互斥拒绝。"""
+    monkeypatch.setattr(btest, "_settle_impl", _fake_settle)
+    monkeypatch.setattr(btest, "RETRY_SLEEP", 0.01)
+
+    # 先构造一个 error 回测（第 3 天全败）
+    fail_12 = {"fail": True}
+    impl, _calls = make_resume_fake(fail_12)
+    monkeypatch.setattr(btest, "_run_review_day_impl", impl)
+    bt_id = _start("2026-08-10", "2026-08-14")
+    fin = _wait_backtest(bt_id)
+    assert fin["status"] == "error", f"应构造 error 回测，实际 {fin['status']}"
+
+    # 切换为缓慢成功 impl，续跑后保持 running，制造互斥窗
+    def slow_ok(date, mode, max_rounds, trace, progress_cb=None):
+        _write_products(date)
+        time.sleep(1.0)  # 拉长 running 窗
+        return {
+            "meta": {"date": date}, "report": "测试报告", "snapshot": {"date": date},
+            "record_id": date, "quality": None,
+            "stage_timings": _stage_timings(), "analyst_timings": _analyst_timings(),
+        }
+
+    monkeypatch.setattr(btest, "_run_review_day_impl", slow_ok)
+    fail_12["fail"] = False
+
+    r1 = client.post(f"/api/backtest/{bt_id}/resume")
+    assert r1.status_code == 200, f"首次 resume 应 200，实际 {r1.status_code} {r1.text}"
+
+    # 等进入 running
+    deadline = time.monotonic() + 10
+    running = False
+    while time.monotonic() < deadline:
+        d = client.get(f"/api/backtest/{bt_id}").json()
+        if d["status"] == "running":
+            running = True
+            break
+        time.sleep(0.02)
+    assert running, "续跑应进入 running"
+
+    # 互斥：续跑运行中再 resume（同一回测）→ 409「运行中」
+    r2 = client.post(f"/api/backtest/{bt_id}/resume")
+    assert r2.status_code == 409, \
+        f"续跑运行中再 resume 应 409，实际 {r2.status_code} {r2.text}"
+    detail = str(r2.json().get("detail") or "")
+    assert ("运行" in detail) or ("进行" in detail), \
+        f"409 原因应中文含「运行中/进行中」，实际：{r2.json()}"
+
+    # 收尾：清掉缓慢续跑，避免拖慢 suite（取消）
+    client.post(f"/api/backtest/{bt_id}/cancel")
+    _wait_backtest(bt_id)
+
+
+# ────────────────── H4：delete_review keep_snapshot 保留行情快照（+ 普通删除回归） ──────────────────
+
+def test_h4_delete_review_keep_snapshot_retains():
+    """H4：delete_review(date, keep_snapshot=True) 删除产物后 market_data.json 仍在；
+    该日 meta/report 等产物被清，但快照保留（离线回放不破坏）。"""
+    from stock_review_crew.storage import reviews as reviews_store
+
+    d = "2026-08-12"
+    reviews_store.save_review({"date": d, "time": "150000", "mode": "close"}, "# 报告", {"index": 1})
+    reviews_store.save_market_data(d, {"date": d, "market_data": "# 行情快照"})
+    snap = reviews_store.market_data_path(d)
+    assert snap.is_file(), "前置：快照应先写好"
+
+    try:
+        result = reviews_store.delete_review(d, keep_snapshot=True)
+    except TypeError as exc:
+        raise AssertionError(
+            "delete_review 尚无 keep_snapshot 参数（expected red，待实现代理合入后应变绿）："
+            f"{exc}"
+        ) from exc
+
+    assert result is True, "带 keep_snapshot 删除应返回 True"
+    assert snap.is_file(), \
+        "keep_snapshot=True 删除产物后 market_data.json 应保留（防复发：恢复离线回放）"
+    assert not (reviews_store.reviews_root() / d / "meta.json").exists(), "产物 meta 应被删"
+    assert not (reviews_store.reviews_root() / d / "report.json").exists(), "产物 report 应被删"
+
+
+def test_h4_plain_delete_removes_snapshot():
+    """H4 回归：不带 keep_snapshot 的普通 delete_review 删整份（含 market_data.json）——
+    页面/管理的删除语义不变（test_storage_reviews 既有 delete 用例不破坏）。"""
+    from stock_review_crew.storage import reviews as reviews_store
+
+    d = "2026-08-12"
+    reviews_store.save_review({"date": d, "time": "150000", "mode": "close"}, "# 报告", {"index": 1})
+    reviews_store.save_market_data(d, {"date": d, "market_data": "# 行情快照"})
+    snap = reviews_store.market_data_path(d)
+    assert snap.is_file()
+
+    assert reviews_store.delete_review(d) is True
+    assert not (reviews_store.reviews_root() / d).exists(), "普通删除应删整份目录（含快照）"
+    assert not snap.exists(), "普通 delete_review 应连 market_data.json 一并删除"
+
+
+# ────────────────── H6：_run_one_day 产物校验失败清理保留快照（防复发） ──────────────────
+
+def _write_products_llm_degraded(date_str: str) -> None:
+    """写校验不合格产物：report/plan/meta 齐全，但 meta.degraded 含
+    「LLM 不可用」（命中 LLM_DEGRADED_MARKERS）→ validate_run_product 拒绝。"""
+    from stock_review_crew.accounts import plan as plan_store
+
+    review_dir = _reviews_store_root() / date_str
+    review_dir.mkdir(parents=True, exist_ok=True)
+    (review_dir / "meta.json").write_text(json.dumps({
+        "date": date_str, "mode": "close", "mode_label": "收盘复盘",
+        "degraded": ["LLM 不可用：所有分析师降级为规则"], "sources": ["测试源"],
+        "disclaimer": "仅供参考，不构成投资建议", "summary": "测试摘要",
+    }, ensure_ascii=False), encoding="utf-8")
+    (review_dir / "report.json").write_text(json.dumps({
+        "final_report": "# 测试报告\n> 仅供参考，不构成投资建议",
+        "analyses": [{"skill_id": s[0], "skill_name": s[1]} for s in SKILLS],
+    }, ensure_ascii=False), encoding="utf-8")
+    plan_p = plan_store.plan_path(date_str)
+    plan_p.parent.mkdir(parents=True, exist_ok=True)
+    plan_p.write_text(json.dumps({
+        "date": date_str, "mode": "close",
+        "plans": [{"rec_date": date_str, "skill_id": s[0], "skill_name": s[1],
+                   "code": "600001", "side": "buy", "target_price": 10.0,
+                   "position_cheng": 1, "qty": None} for s in SKILLS],
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def _reviews_store_root():
+    from stock_review_crew.storage import reviews as reviews_store
+
+    return reviews_store.reviews_root()
+
+
+def test_h6_product_validation_failure_preserves_snapshot(monkeypatch):
+    """H6：_run_one_day 产物校验失败路径（预写快照再触发失败）→ 清理后该日
+    market_data.json 仍存在；坏产物（meta/report）被清。保证离线回放不破坏。"""
+    from stock_review_crew.storage import reviews as reviews_store
+
+    monkeypatch.setattr(btest, "_settle_impl", _fake_settle)
+    monkeypatch.setattr(btest, "RETRY_SLEEP", 0.01)
+
+    d = "2026-08-12"
+    # 前置：预写完整行情快照（模拟真实离线回放前置条件）
+    reviews_store.save_market_data(d, {"date": d, "market_data": "# 好快照"})
+    snap = reviews_store.market_data_path(d)
+    assert snap.is_file(), "前置：快照应先写好"
+
+    # mock 单日：产物校验失败（写 LLM 降级 meta → validate_run_product=False）
+    def bad_impl(date, mode, max_rounds, trace, progress_cb=None):
+        _write_products_llm_degraded(date)
+        now = time.monotonic()
+        return {"meta": {"date": date}, "report": "测试报告",
+                "snapshot": {"date": date}, "record_id": date, "quality": None,
+                "stage_timings": {k: {"started_at": now, "elapsed_ms": 0}
+                                  for k in ("fetch", "analysts", "host", "report")},
+                "analyst_timings": {}}
+
+    monkeypatch.setattr(btest, "_run_review_day_impl", bad_impl)
+
+    bt = btest._new_backtest({
+        "start": d, "end": d, "mode": "close", "force": False,
+        "lite": False, "max_rounds": 3,
+    })
+    try:
+        btest._run_one_day(bt, 0)
+    except btest._BacktestStopped as exc:
+        assert exc.bt["status"] == "error", "产物校验失败应 fail-fast → error"
+    else:
+        raise AssertionError("_run_one_day 产物校验失败应抛 _BacktestStopped（fail-fast）")
+
+    # 防复发：清理后快照仍在，坏产物被清
+    assert snap.is_file(), \
+        "产物校验失败清理后 market_data.json 应保留（红：实现未合入会整删快照）"
+    assert not (reviews_store.reviews_root() / d / "meta.json").exists(), "坏产物 meta 应被清"
+    assert not (reviews_store.reviews_root() / d / "report.json").exists(), "坏产物 report 应被清"

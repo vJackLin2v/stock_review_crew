@@ -391,9 +391,15 @@ def get_review(date: Any, time: Optional[Any] = None) -> dict:
     }
 
 
-def delete_review(date: Any, time: Optional[Any] = None) -> bool:
+def delete_review(date: Any, time: Optional[Any] = None, *, keep_snapshot: bool = False) -> bool:
     """删除复盘记录（R11 R4：按日期删除整份；time 指定时仅删旧结构单条目）。
 
+    keep_snapshot=True（防复发，H4）：整日删除时**保留行情快照** market_data.json，
+    只删 meta/report/plan/snapshot 等复盘产物——好快照是离线回放的预热缓存，
+    详见 save_review 的注释。实现：先备份快照 → 删整目录（含旧结构子目录）→ 恢复快照。
+    安全简单：走目录删除兜底兼容旧结构多份，避免逐文件枚举遗漏。
+    注意：keep_snapshot 仅在整日删除（time=None）时生效；time 指定删除旧结构单条目
+    不受影响。默认 False 行为不变（删整份，Web/管理操作语义回归既有测试）。
     非法 id / 不存在 / 删除失败均返回 False，绝不抛异常；旧结构条目删空后清理空日期目录。
     """
     if not _valid_date(date):
@@ -420,10 +426,31 @@ def delete_review(date: Any, time: Optional[Any] = None) -> bool:
         except Exception:  # noqa: BLE001 - 空目录清理失败不影响删除结果
             pass
         return True
+    # 整日删除：可选保留行情快照（备份 → 删目录 → 恢复）
+    _snap_backup: Optional[Path] = None
+    _md_name = _MARKET_DATA_FILENAME
+    if keep_snapshot:
+        md_path = date_dir / _md_name
+        if md_path.is_file():
+            try:
+                _snap_backup = date_dir.with_name(f".{date}.md_del_tmp")
+                shutil.copy2(md_path, _snap_backup)
+            except Exception:  # noqa: BLE001 - 备份失败不阻塞（最坏快照被删，回退旧行为）
+                _snap_backup = None
     try:
         shutil.rmtree(date_dir)
     except Exception:
         return False
+    if _snap_backup is not None and _snap_backup.exists():
+        try:
+            date_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(_snap_backup, date_dir / _md_name)
+        except Exception:  # noqa: BLE001 - 快照恢复失败不阻塞（删除本身已成功）
+            pass
+        try:
+            _snap_backup.unlink()
+        except Exception:  # noqa: BLE001
+            pass
     return True
 
 
