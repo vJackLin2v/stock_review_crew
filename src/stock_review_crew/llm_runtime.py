@@ -16,7 +16,9 @@ import time
 from typing import Any
 
 DISCLAIMER = "仅供参考，不构成投资建议"
-_INVOKE_TIMEOUT = 150.0  # R12 修复：LLM 调用硬超时（httpx timeout 对流式/挂起连接不生效）
+_INVOKE_TIMEOUT = 200.0  # LLM 调用硬超时（httpx timeout 对流式/挂起连接不生效）。
+# 2026-08-16 调优 150→200s：opencode 慢响应 150-200s 不再被误杀（8-06/8-07 实测
+# LLM 正常 73-91s、慢到 154-279s；硬超时 200s 减少边缘误判，正常响应不受影响）。
 
 
 def llm_ready() -> bool:

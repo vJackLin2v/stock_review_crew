@@ -188,3 +188,70 @@
   无重试的天不显示重试表；normalize 对缺省 attempts_log 安全。
 - D4：npm run build 通过；msedge headless 冒烟：历史回测打开后每天明细含当天已耗时，
   重试过（attempts>1）的天显示重试明细表。
+
+---
+
+## 追加：LLM 超时调优 + 重试策略按失败类型区分（2026-08-16 用户确认 B1/B2）
+
+### 背景（数据分析）
+8-06/8-07 回测重试 2 次：分析师阶段 LLM 154s/279s（正常 73-91s）、报告阶段 8-06 157s。
+根因：单次 LLM 调用硬超时 `llm_runtime._INVOKE_TIMEOUT=150s`——opencode 响应慢/挂起 >150s
+→ TimeoutError → 整日失败 → 按 MAX_ATTEMPTS=3 重试（整日全流程重跑，浪费）。取数侧走
+离线回放稳定（非取数问题）。
+
+### B1：LLM 单次调用硬超时 150s → 200s
+`src/stock_review_crew/llm_runtime.py::_INVOKE_TIMEOUT`（L19）150.0 → 200.0。
+减少边缘误杀（8-07 成功那次单次调用 <150s，不受影响；慢响应 150-200s 不再被误判）。
+
+### B2：重试策略按失败类型区分
+`backend/backtest.py`：
+1. 新增 `LLM_MAX_ATTEMPTS = 2`（LLM 超时类失败最多尝试 2 次即 fail-fast，避免第 3 次
+   整日重跑浪费；LLM 慢是持续状态，重试收益低）。
+2. 失败分类函数 `_is_llm_failure(exc)`：`isinstance(exc, TimeoutError)` → True
+   （llm_runtime 硬超时抛 TimeoutError 为主 LLM 失败形态；DataValidationError/其他按
+   data 类保持 MAX_ATTEMPTS=3——取数/校验失败重试可能有效：缓存热了/源恢复）。
+3. `_run_one_day` 重试循环：首次失败后若判定 LLM 类 → 后续尝试上限降为
+   `LLM_MAX_ATTEMPTS`；`day.attempts` / `current.attempts` 用实际生效上限
+   （LLM 类日 =2，data 类日 =3）；`attempts_log` 正常记录每次尝试。
+   注：现有 A4 测试 mock 抛 RuntimeError → data 类 → attempts 仍 =3，不破坏。
+
+### 验收
+- E1：`llm_runtime._INVOKE_TIMEOUT == 200.0`。
+- E2：mock 单日抛 TimeoutError → 恰好尝试 2 次后 fail-fast（status=error、
+  day.attempts==2、attempts_log 长度 2 全失败、last_error 含中文）；且不抛 3 次。
+- E3：mock 抛非 TimeoutError（如 RuntimeError/DataValidationError）→ 保持 3 次尝试
+  （现有 A3/A4 用例回归绿）。
+- E4：前端 attempts 动态显示（第 N/2 或 N/3），build 通过。
+
+---
+
+## 追加：回测「快速模式」节点开关（跳过主持人/报告 LLM，2026-08-16 用户确认）
+
+### 背景
+8-06/8-07 回测慢：报告阶段 157s + 主持人 27s 都是 LLM 耗时大头。用户明确：
+「这种回测根本不需要主持人和出报告，只要给数据+分析师判断即可，完全可以去掉
+主持人和报告的 LLM」。
+
+### 设计（lite 快速模式）
+- **回测参数 `lite: bool`**（POST /api/backtest/start 支持；前端回测页 checkbox
+  「快速模式（跳过主持人/报告 LLM）」）→ `run_review_day(..., lite=...)` →
+  `default_initial_state(..., lite=...)` → state["lite"]。
+- **host_node**：`state["lite"]` 为真 → 跳过 LLM，直接 `_rule_host` + host_analysis
+  （文本标注「快速模式」而非「降级模式」；不写 LLM 降级 degraded_notes）。
+- **report_node**：`state["lite"]` 为真 → 跳过 LLM，用现有 `_rule_report(state)`
+  规则汇总生成 final_report + tags（`_rule_tags` 的「降级模式」标签改为「快速模式」）；
+  不抛 LLM 错误；`ensure_disclaimer` 保留。
+- **meta.degraded**：lite 时追加「快速模式：跳过主持人/报告 LLM 调用」——
+  不含 LLM_DEGRADED_MARKERS（"LLM 不可用/LLM 失败/降级为规则"）→
+  `validate_run_product` 天然放行，无需改校验。
+- **分析师节点不变**（仍走 LLM——用户要分析师判断）。
+- 页面复盘（trace=true）不受影响（lite 仅回测/脚本批量传）。
+
+### 验收
+- F1：lite 回测单日完成（status=done），report.json 存在且为规则汇总（文本含
+  「快速模式」、不含「LLM 生成报告失败」）；meta.degraded 含「快速模式」但
+  validate_run_product 通过。
+- F2：lite 时 host/report 阶段**不触发 LLM**（注入 mock LLM 计数断言 host/report
+  阶段零 LLM 调用；或 stage_timings host/report elapsed 极小）。
+- F3：非 lite 行为不变（回归：现有 A/D/E 用例全绿）。
+- F4：前端回测页有「快速模式」checkbox；build 通过；冒烟确认渲染。

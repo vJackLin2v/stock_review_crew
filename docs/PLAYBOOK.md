@@ -887,3 +887,19 @@
 - 备注/复现：`tests/test_backtest_live_diag.py` 8 用例（A1-A7）；`test_backtest.py` 两处
   旧断言同步（attempts==1→3、review==400→非负+口径相等）；前端 build + msedge headless
   冒烟（`.tmp/smoke_bt.py`：历史回测打开、重试徽标、终态不误显「正在重试」）。**
+
+### [2026-08-16] LLM 超时调优（150→200s）+ 失败类型分类重试（TimeoutError→2 次 fail-fast）
+- 现象/需求：回测分析师/report 阶段 8-06/8-07 重试 2 次浪费——单次 LLM 硬超时
+  `llm_runtime._INVOKE_TIMEOUT=150s`，opencode 慢响应 >150s 被判 TimeoutError → 整日按
+  MAX_ATTEMPTS=3 重跑。调优：① `_INVOKE_TIMEOUT` 150→200；② `backend/backtest.py`
+  失败分类 fail-fast——`LLM_MAX_ATTEMPTS=2` + `_is_llm_failure(exc)=isinstance(exc,
+  TimeoutError)`；`_run_one_day` 动态上限 `max_attempts`：data 类（RuntimeError/
+  DataValidationError 等）保持 3，LLM 类首败后降 2 即 fail-fast；`day.attempts`/
+  `current.attempts` 用实际生效上限。
+- 坑（共享工作区并发合并）：TEST 写 E1/E2/E3 测试时首次跑 E2 红（3 次）证明旧实现被卡住，
+  随后 IMPL 合入同一工作区 → 第二次跑全绿（2 次 fail-fast）。凡是「预期先红后绿」的契约
+  测试，断言必须让旧实现必然红——E2 用「次数==2 且不抛第 3 次 + day.attempts==2 +
+  attempts_log 长度 2 全失败且 reason 含『超时』 + current.stage=error」确定性区分。
+- 备注/复现：验收新增 test_e1_llm_invoke_timeout_200 / test_e2_llm_timeout_failfast_
+  two_attempts / test_e3_data_failure_keeps_three_attempts；tests/test_backtest_live_diag.py
+  15 全绿。

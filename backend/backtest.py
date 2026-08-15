@@ -44,9 +44,17 @@ logger = logging.getLogger("stock_review_crew.backend")
 
 ROOT = Path(__file__).resolve().parent.parent
 
-MAX_ATTEMPTS = 3  # 单日最多尝试次数（含首次）；屡败即 fail-fast 中止
+MAX_ATTEMPTS = 3  # data 类失败（取数/校验/其他）单日最多尝试次数（含首次）；屡败即 fail-fast 中止
+# LLM 超时类失败最多尝试次数（慢是持续状态，重试收益低 → 首败后上限降到 2，避免第 3 次整日重跑浪费）
+LLM_MAX_ATTEMPTS = 2
 RETRY_SLEEP = 2   # 失败重试间隔（秒；回测用短间隔便于测试/观察，重试语义同 review_batch）
 STAGES = ("fetch", "analysts", "host", "report")  # 资讯默认关，无 news
+
+
+def _is_llm_failure(exc: BaseException) -> bool:
+    """LLM 超时类失败：llm_runtime 硬超时抛 TimeoutError（慢/挂起为持续状态，
+    整日重试收益低 → 限制尝试次数）。取数校验 DataValidationError/其他按 data 类。"""
+    return isinstance(exc, TimeoutError)
 
 # meta.degraded 中命中即判 LLM 降级的关键词（复核 work/review_batch.LLM_DEGRADED_MARKERS 口径）
 LLM_DEGRADED_MARKERS = ("LLM 不可用", "LLM 失败", "降级为规则")
@@ -274,7 +282,7 @@ def _run_one_day(bt: dict, day_index: int) -> None:
             "message": message,
             "pct": pct,
             "attempt": attempt,
-            "attempts": MAX_ATTEMPTS,
+            "attempts": max_attempts,
             "last_error": last_error or None,
             "node_started_at": node_started_at,
         }
@@ -290,10 +298,16 @@ def _run_one_day(bt: dict, day_index: int) -> None:
     review_total_ms = 0
     # 每次尝试一条记录（成功/失败都写，落盘）：attempt/ok/reason/elapsed_ms/retry_sleep_ms
     attempts_log: list[dict] = []
+    # 实际生效的尝试上限（动态）：默认 data 类 MAX_ATTEMPTS(3)；一旦某次失败判为 LLM 超时类
+    # → 降为 LLM_MAX_ATTEMPTS(2) 并 fail-fast，避免第 3 次整日重跑浪费
+    max_attempts = MAX_ATTEMPTS
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        # 尝试开始前：若已超过当前生效上限（如 LLM 类降到 2 后）→ 直接 fail-fast 跳出
+        if attempt > max_attempts:
+            break
         day["attempt"] = attempt
-        # 修复 bug：attempts 应为固定上限 MAX_ATTEMPTS（3），原错写成 attempt 当前次数
-        day["attempts"] = MAX_ATTEMPTS
+        # attempts 为实际生效上限（LLM 类日 =2，data 类日 =3），原 bug 错写成当前次数
+        day["attempts"] = max_attempts
         _update_current("review", "", 0.0, persist=True)
         _t1 = time.monotonic()
         try:
@@ -305,16 +319,19 @@ def _run_one_day(bt: dict, day_index: int) -> None:
         except Exception as exc:  # noqa: BLE001 - DataValidationError 等一律按单日失败处理
             logger.warning("[backtest] %s 第 %d 次失败：%s", date_str, attempt, exc)
             last_error = str(exc)
+            # LLM 超时类失败：慢/挂起为持续状态，重试收益低 → 后续尝试上限降为 LLM_MAX_ATTEMPTS
+            if _is_llm_failure(exc):
+                max_attempts = LLM_MAX_ATTEMPTS
             elapsed_ms = int((time.monotonic() - _t1) * 1000)
             # 该次失败后重试等待：最后一次（不再重试）为 0
-            retry_sleep_ms = int(RETRY_SLEEP * 1000) if attempt < MAX_ATTEMPTS else 0
+            retry_sleep_ms = int(RETRY_SLEEP * 1000) if attempt < max_attempts else 0
             # 本次尝试耗时计入累计（失败不算命中）
             review_total_ms += elapsed_ms
             attempts_log.append({
                 "attempt": attempt, "ok": False, "reason": last_error,
                 "elapsed_ms": elapsed_ms, "retry_sleep_ms": retry_sleep_ms,
             })
-            if attempt < MAX_ATTEMPTS:
+            if attempt < max_attempts:
                 _update_current("review", "失败准备重试", 0.0, persist=True)
                 # 重试间隔等待也计入当天统计时间
                 time.sleep(RETRY_SLEEP)
@@ -325,7 +342,7 @@ def _run_one_day(bt: dict, day_index: int) -> None:
         ok, reasons = validate_run_product(date_str)
         if not ok:
             last_error = "；".join(reasons)
-            retry_sleep_ms = int(RETRY_SLEEP * 1000) if attempt < MAX_ATTEMPTS else 0
+            retry_sleep_ms = int(RETRY_SLEEP * 1000) if attempt < max_attempts else 0
             attempts_log.append({
                 "attempt": attempt, "ok": False, "reason": last_error,
                 "elapsed_ms": review_ms, "retry_sleep_ms": retry_sleep_ms,
@@ -339,7 +356,7 @@ def _run_one_day(bt: dict, day_index: int) -> None:
                 pass
             # 本次尝试耗时计入累计（产物不合格也算一次失败尝试）
             review_total_ms += review_ms
-            if attempt < MAX_ATTEMPTS:
+            if attempt < max_attempts:
                 _update_current("review", last_error, 0.0, persist=True)
                 # 重试间隔等待也计入当天统计时间
                 time.sleep(RETRY_SLEEP)
@@ -376,7 +393,7 @@ def _run_one_day(bt: dict, day_index: int) -> None:
         bt["total_elapsed_ms"] = _total_run_ms(bt)
         bt["current"] = {
             "date": date_str, "stage": "error", "message": day["error"],
-            "pct": 0.0, "attempt": attempt, "attempts": MAX_ATTEMPTS,
+            "pct": 0.0, "attempt": day["attempt"], "attempts": max_attempts,
             "last_error": last_error or None,
             # 终态无节点已耗时（GET 不计算 elapsed_ms，前端显示「—」）
             "node_started_at": None,

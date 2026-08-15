@@ -706,3 +706,119 @@ def test_d1_history_day_without_attempts_log_keeps_fields():
         == old_day["elapsed_ms"], "历史日 elapsed 口径一致"
     # 前端语义：缺 attempts_log 即「无重试明细」，attempt=1 与单条成功一致
     assert old_day["attempt"] == 1, "历史日 attempt 应为 1（首次即成功）"
+
+
+# ═══════════════════════════════════════════════════════════════
+# E1：LLM 单次调用硬超时 150s → 200s（追加需求 2026-08-16 B1）
+# ═══════════════════════════════════════════════════════════════
+
+def test_e1_llm_invoke_timeout_200():
+    """E1：llm_runtime._INVOKE_TIMEOUT 应为 200.0（150→200，减少边缘误杀）。
+
+    验证方式：import src/.../llm_runtime 后直接断言常量（不改实现文件）。
+    """
+    from stock_review_crew import llm_runtime
+
+    assert getattr(llm_runtime, "_INVOKE_TIMEOUT", None) == 200.0, \
+        "llm_runtime._INVOKE_TIMEOUT 应等于 200.0（实现未合入：仍为旧值 150.0）"
+
+
+# ═══════════════════════════════════════════════════════════════
+# E2：LLM 类失败（TimeoutError）→ 最多 2 次尝试即 fail-fast
+#   - mock 每次抛 python 内置 TimeoutError（LLM 硬超时形态）
+#   - 恰好转 2 次（不抛第 3 次）→ status=error、day.attempts==2、
+#     attempts_log 长度 2 全 ok=False 且 reason 含「超时」、day.error 中文、
+#     current.stage=error。
+# ═══════════════════════════════════════════════════════════════
+
+def test_e2_llm_timeout_failfast_two_attempts(monkeypatch):
+    """E2：单日抛 TimeoutError → 恰好尝试 2 次后 fail-fast（LLM_MAX_ATTEMPTS=2）。
+
+    失败分类：_is_llm_failure(TimeoutError)=True → 首败后上限降为 2；
+    day.attempts/current.attempts 用实际上限 2；attempts_log 2 条全失败且 reason 含「超时」。
+    """
+    monkeypatch.setattr(btest, "_settle_impl", _fake_settle)
+    monkeypatch.setattr(btest, "RETRY_SLEEP", 0.01)
+
+    calls: list[dict] = []
+
+    def llm_timeout_impl(date, mode, max_rounds, trace, progress_cb=None):
+        attempt = sum(1 for c in calls if c["date"] == date) + 1
+        calls.append({"date": date, "attempt": attempt, "ok": False})
+        if progress_cb:
+            progress_cb("analysts", 20, f"第 {attempt} 次尝试 分析师 1/5", None)
+        # LLM 硬超时形态：python 内置 TimeoutError
+        raise TimeoutError("LLM 调用超时（200s），按降级处理")
+
+    monkeypatch.setattr(btest, "_run_review_day_impl", llm_timeout_impl)
+    bt_id = _start("2026-08-10", "2026-08-10")
+    fin = _wait_backtest(bt_id)
+
+    assert fin["status"] == "error", f"LLM 超时 2 次应 fail-fast → status=error，实际 {fin['status']}"
+    day_calls = [c for c in calls if c["date"] == "2026-08-10"]
+    assert len(day_calls) == 2, f"LLM 类失败应恰好尝试 2 次，实际 {len(day_calls)} 次"
+    assert [c["attempt"] for c in day_calls] == [1, 2], \
+        f"尝试序号应为 [1, 2]，实际 {[c['attempt'] for c in day_calls]}"
+
+    cur = fin.get("current")
+    assert cur is None or cur.get("stage") == "error", \
+        f"current.stage 应为 error，实际 {cur}"
+    assert cur is None or cur.get("attempts") == 2, \
+        f"current.attempts 应为 2（LLM 日实际上限），实际 {cur.get('attempts')}"
+
+    day = fin["days"][0]
+    assert day["status"] == "failed"
+    assert day["attempts"] == 2, f"LLM 日 day.attempts 应为 2，实际 {day['attempts']}"
+    assert day["attempt"] == 2, f"LLM 日最后 attempt 应为 2，实际 {day['attempt']}"
+    assert day["error"] and "超时" in str(day["error"]), \
+        f"day.error 应为中文超时原因，实际：{day.get('error')}"
+
+    log = day.get("attempts_log")
+    assert log is not None, f"LLM fail-fast 日应有 attempts_log（实现未合入？）：{day.get('attempts_log')}"
+    assert len(log) == 2, f"LLM 日 attempts_log 应 2 条（不抛第 3 次），实际 {len(log)}"
+    for entry in log:
+        assert entry["ok"] is False, f"全失败条目 ok 应为 False：{entry}"
+        assert "超时" in entry["reason"], \
+            f"LLM 失败条目 reason 应含「超时」，实际：{entry['reason']}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# E3：data 类失败（非 TimeoutError）→ 保持 3 次尝试（回归不误判为 LLM 类）
+#   现有 test_a3_failfast / test_a4 已覆盖 RuntimeError → 3 次的语义；
+#   这里补一个显式 E3 回归：RuntimeError 抛满仍恰好 3 次、attempts==3，
+#   并断言不会被 _is_llm_failure 误判（data 类保持 MAX_ATTEMPTS）。
+# ═══════════════════════════════════════════════════════════════
+
+def test_e3_data_failure_keeps_three_attempts(monkeypatch):
+    """E3：mock 抛 RuntimeError（行情源不可用，data 类）→ 保持 3 次尝试、day.attempts==3。
+
+    回归 A3/A4 语义，且证明 data 类未被 LLM 分类逻辑降上限。
+    """
+    monkeypatch.setattr(btest, "_settle_impl", _fake_settle)
+    monkeypatch.setattr(btest, "RETRY_SLEEP", 0.01)
+
+    calls: list[dict] = []
+
+    def data_fail_impl(date, mode, max_rounds, trace, progress_cb=None):
+        attempt = sum(1 for c in calls if c["date"] == date) + 1
+        calls.append({"date": date, "attempt": attempt, "ok": False})
+        if progress_cb:
+            progress_cb("analysts", 20, f"第 {attempt} 次尝试 分析师 1/5", None)
+        raise RuntimeError("模拟单日失败：行情源暂时不可用")
+
+    monkeypatch.setattr(btest, "_run_review_day_impl", data_fail_impl)
+    bt_id = _start("2026-08-10", "2026-08-10")
+    fin = _wait_backtest(bt_id)
+
+    assert fin["status"] == "error", f"data 类 3 次全败应 status=error，实际 {fin['status']}"
+    day_calls = [c for c in calls if c["date"] == "2026-08-10"]
+    assert len(day_calls) == 3, f"data 类失败应恰好尝试 3 次（不降上限），实际 {len(day_calls)} 次"
+    assert [c["attempt"] for c in day_calls] == [1, 2, 3], \
+        f"尝试序号应为 [1, 2, 3]，实际 {[c['attempt'] for c in day_calls]}"
+
+    day = fin["days"][0]
+    assert day["status"] == "failed"
+    assert day["attempts"] == btest.MAX_ATTEMPTS == 3, \
+        f"data 类日 day.attempts 应为 3（MAX_ATTEMPTS），实际 {day['attempts']}"
+    log = day.get("attempts_log")
+    assert log is not None and len(log) == 3, f"data 日 attempts_log 应 3 条，实际 {len(log)}"
