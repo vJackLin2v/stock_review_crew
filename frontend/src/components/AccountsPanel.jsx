@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "../api";
 import { normalizeAccountDetail, normalizeAccounts } from "../normalize";
-import { fmtAmount, fmtCount, fmtPct, num } from "../format";
+import { fmtAmount, fmtCount, fmtPct, num, pctClass } from "../format";
 import { Chart } from "./Charts";
 
 // R12-A3：侧栏「模拟账户」独立视图
@@ -206,43 +206,58 @@ export function PositionsTable({ positions, nameMap = {} }) {
   );
 }
 
-// 2026-08-13：历史持仓（已全部卖出的股票及其完整买卖周期与盈亏，红涨绿跌）
+// 历史持仓（已全部卖出的股票及其完整买卖周期与盈亏，红涨绿跌；按 FIFO 买卖配对）
+// 收益率 = realized_pnl / buy_amount（×100%，前端 ×100 展示；None 显示「—」）
 export function ClosedPositionsTable({ closedPositions, nameMap = {} }) {
   const rows = Array.isArray(closedPositions) ? closedPositions : [];
   if (!rows.length) {
     return <div className="card-sub">暂无历史持仓</div>;
   }
+  // 兼容旧字段：新后端发 buy_date/sell_date，旧历史数据保留 first/last
+  const buyDate = (c) => c.buy_date || c.first_buy_date || "—";
+  const sellDate = (c) => c.sell_date || c.last_sell_date || "—";
   return (
     <table className="table table-sm">
       <thead>
         <tr>
           <th>代码</th>
           <th>名称</th>
+          <th>买入日期</th>
+          <th>卖出日期</th>
           <th>买入股数</th>
-          <th>卖出股数</th>
           <th>平均买价</th>
           <th>平均卖价</th>
+          <th>买入金额</th>
           <th>已实现盈亏</th>
-          <th>首买日</th>
-          <th>末卖日</th>
+          <th>收益率</th>
           <th>持仓天数</th>
         </tr>
       </thead>
       <tbody>
-        {rows.map((c) => {
+        {rows.map((c, i) => {
           const pnlCls =
             (c.realized_pnl || 0) > 0 ? "pos" : (c.realized_pnl || 0) < 0 ? "neg" : "zero";
+          // 收益率 = realized_pnl / buy_amount（小数存储，前端 ×100）
+          const retVal =
+            Number.isFinite(c.realized_pnl) &&
+            Number.isFinite(c.buy_amount) &&
+            c.buy_amount !== 0
+              ? c.realized_pnl / c.buy_amount
+              : NaN;
           return (
-            <tr key={c.code}>
+            <tr key={`${c.code}-${i}`}>
               <td>{c.code}</td>
               <td>{nameMap[c.code] || c.name || c.code}</td>
+              <td>{buyDate(c)}</td>
+              <td>{sellDate(c)}</td>
               <td>{fmtCount(c.buy_qty)}</td>
-              <td>{fmtCount(c.sell_qty)}</td>
               <td>{Number.isFinite(c.avg_buy_price) ? c.avg_buy_price.toFixed(2) : "—"}</td>
               <td>{Number.isFinite(c.avg_sell_price) ? c.avg_sell_price.toFixed(2) : "—"}</td>
+              <td>{Number.isFinite(c.buy_amount) ? fmtAmount(c.buy_amount) : "—"}</td>
               <td className={pnlCls}>{fmtSignedMoney(c.realized_pnl)}</td>
-              <td>{c.first_buy_date || "—"}</td>
-              <td>{c.last_sell_date || "—"}</td>
+              <td className={Number.isFinite(retVal) ? pctClass(retVal) : "zero"}>
+                {Number.isFinite(retVal) ? `${(retVal * 100).toFixed(2)}%` : "—"}
+              </td>
               <td>{Number.isFinite(c.holding_days) ? `${c.holding_days} 天` : "—"}</td>
             </tr>
           );
@@ -289,24 +304,35 @@ export function AccountTradesTable({ trades, nameMap = {} }) {
           </tr>
         </thead>
         <tbody>
-          {visible.map((t, i) => (
-            <tr key={`${t.date}-${t.code}-${i}`}>
-              <td>{t.date || "—"}</td>
-              <td>{t.code || "—"}</td>
-              <td>{nameMap[t.code] || t.name || t.code}</td>
-              <td className={t.side === "buy" ? "pos" : t.side === "sell" ? "neg" : "zero"}>
-                {t.side === "buy" ? "买入" : t.side === "sell" ? "卖出" : "—"}
-              </td>
-              <td>{t.price != null ? t.price.toFixed(2) : "—"}</td>
-              <td>{fmtCount(t.qty)}</td>
-              <td>{t.amount != null ? fmtAmount(t.amount) : "—"}</td>
-              <td>{t.fee != null ? fmtAmount(t.fee) : "—"}</td>
-              <td className={t.isRejected ? "neg" : "pos"}>
-                {t.isRejected ? "拒绝" : "成交"}
-              </td>
-              <td title={t.reject_reason}>{t.reject_reason ? t.reject_reason.slice(0, 24) : "—"}</td>
-            </tr>
-          ))}
+          {visible.map((t, i) => {
+            // 原因列：拒绝单显示拒绝原因；成交单显示 买入理由/卖出理由（条件单卖出为中文）
+            const reason =
+              t.isRejected
+                ? t.reject_reason
+                : t.side === "buy"
+                  ? t.buy_reason
+                  : t.side === "sell"
+                    ? t.sell_reason
+                    : "";
+            return (
+              <tr key={`${t.date}-${t.code}-${i}`}>
+                <td>{t.date || "—"}</td>
+                <td>{t.code || "—"}</td>
+                <td>{nameMap[t.code] || t.name || t.code}</td>
+                <td className={t.side === "buy" ? "pos" : t.side === "sell" ? "neg" : "zero"}>
+                  {t.side === "buy" ? "买入" : t.side === "sell" ? "卖出" : "—"}
+                </td>
+                <td>{t.price != null ? t.price.toFixed(2) : "—"}</td>
+                <td>{fmtCount(t.qty)}</td>
+                <td>{t.amount != null ? fmtAmount(t.amount) : "—"}</td>
+                <td>{t.fee != null ? fmtAmount(t.fee) : "—"}</td>
+                <td className={t.isRejected ? "neg" : "pos"}>
+                  {t.isRejected ? "拒绝" : "成交"}
+                </td>
+                <td title={reason}>{reason ? reason.slice(0, 24) : "—"}</td>
+              </tr>
+            );
+          })}
           {!visible.length ? (
             <tr>
               <td colSpan={10} className="card-sub">无{statusFilter === "全部" ? "" : statusFilter}交易记录</td>
@@ -539,7 +565,7 @@ export default function AccountsPanel({ onBack }) {
 
             <div className="card">
               <h3 className="card-title">历史持仓</h3>
-              <p className="card-sub">已全部卖出的股票及其完整买卖周期与盈亏（按末卖日倒序）</p>
+              <p className="card-sub">已全部卖出的股票按 FIFO 买卖配对（同一股票多次买卖为多笔独立记录），按卖出日期倒序</p>
               <ClosedPositionsTable closedPositions={detail.closed_positions} nameMap={stockNames} />
             </div>
 

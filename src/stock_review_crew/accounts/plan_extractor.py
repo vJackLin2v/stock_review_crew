@@ -10,6 +10,8 @@
 - 买入可选条件单字段（requirements-trading-v1 §三/§六）：止损XX.XX元 / 止盈XX.XX元 /
   持有N天 / 回落N%（或 回落N个百分点，→ trailing_drawdown = N/100）；
   解析不到保持 None（撮合入口按引擎默认计算）；
+- 买入/卖出可选「原因是XXX」→ 计划 reason 字段（撮合写入 trade.buy_reason）；
+  捕获不到保持空串（plan 库按 None 归一）；
 - qty 关键字（买入N股/卖出N股）出现时须与 side 一致（旧 qty 式要求，防止矛盾输入入库）；
 - 卖出且 code 不在 held_codes → 跳过并记录 {"type":"sell_skipped_no_position",...}；
 - 通过 accounts.plan.add 写入 plan registry（复用校验/去重/归一），单笔失败不阻塞；
@@ -25,7 +27,9 @@ from typing import Iterable, List
 
 from . import plan as _plan_module
 
-# 统一正则：可选 买入/卖出 前缀 + 6位代码 + [可选名称] + 价格 + (股数 | 成数)
+# 统一正则：可选 买入/卖出 前缀 + 6位代码 + [可选名称] + 价格 + (股数 | 成数)，
+# 可选条件单字段（止损/止盈/回落/持有天数）+ 可选「原因是XXX」理由。
+# reason 捕获到 下一个代码/终止标点/行尾（防多计划粘连，跨行重置逐计划取）。
 _PLAN_RE = re.compile(
     r"(?:(?P<prefix>买入|卖出)\s*)?"
     r"(?P<code>\d{6})\s*(?:(?P<name>[^\s：:，。]{1,12})\s*)?[：:]\s*"
@@ -35,6 +39,8 @@ _PLAN_RE = re.compile(
     r"(?:\s*[，,，\s]*止盈\s*(?P<take_profit>\d+(?:\.\d+)?)\s*元)?"
     r"(?:\s*[，,，\s]*回落\s*(?P<trailing_drawdown>\d+(?:\.\d+)?)\s*(?:%|个百分点))?"
     r"(?:\s*[，,，\s]*持有\s*(?P<max_hold_days>\d+)\s*天)?"
+    # 原因（可选）：原因是XXX —— XXX 到 终止标点（，。；,;\n）/下一个计划代码（防多计划粘连）
+    r"(?:\s*[，,，\s]*原因是\s*(?P<reason>(?:(?!\d{6}\s*[：:]\s*(?:买入价|卖出价))[^，。；;,\n]){0,60})?)?"
 )
 
 
@@ -71,6 +77,12 @@ def _conditional_fields(match: re.Match, side: str) -> dict:
         # 回落 N% / N 个百分点 → 比率小数 N/100（0.05=5 个百分点）
         "trailing_drawdown": (float(tdd) / 100.0) if tdd is not None else None,
     }
+
+
+def _reason_for(match: re.Match) -> str:
+    """提取「原因是XXX」（可选）：捕获不到 → 空串（plan 库按 None 归一）。"""
+    text = (match.group("reason") or "").strip()
+    return text
 
 
 def extract_plans(
@@ -121,6 +133,7 @@ def extract_plans(
                         "position_cheng": 0,
                         "qty": int(float(qty)),
                         "source": "regex_qty",
+                        "reason": _reason_for(m),
                         **_conditional_fields(m, side),
                     }
                 )
@@ -140,6 +153,7 @@ def extract_plans(
                         "position_cheng": float(cheng),
                         "qty": None,
                         "source": "regex_cheng",
+                        "reason": _reason_for(m),
                         **_conditional_fields(m, side),
                     }
                 )

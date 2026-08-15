@@ -269,6 +269,10 @@ export function normalizeAccountTrade(x = {}) {
     isRejected: status !== "成交",
     reject_reason: str(t.reject_reason),
     realized: nullable(t.realized),
+    buy_reason: str(t.buy_reason),
+    sell_reason: str(t.sell_reason),
+    // 条件单卖出 keep condition 英文兼容（展示层用 sell_reason）
+    condition: str(t.condition),
   };
 }
 
@@ -283,20 +287,26 @@ export function normalizeAccountSnapshot(x = {}) {
   };
 }
 
-// 2026-08-13：历史持仓（已平仓，字段契约与后端 closed_positions 对齐）
+// 历史持仓（已平仓，按 FIFO 买卖配对，requirements-trades-fix §三.3 字段契约）
 export function normalizeClosedPosition(x = {}) {
   const p = x && typeof x === "object" ? x : {};
   return {
     code: str(p.code),
     name: str(p.name),
+    buy_date: str(p.buy_date),
+    sell_date: str(p.sell_date),
     buy_qty: nullable(p.buy_qty),
     sell_qty: nullable(p.sell_qty),
     avg_buy_price: nullableOrNull(p.avg_buy_price),
     avg_sell_price: nullableOrNull(p.avg_sell_price),
+    buy_amount: nullableOrNull(p.buy_amount),
     realized_pnl: nullableOrNull(p.realized_pnl),
+    holding_days: nullableOrNull(p.holding_days),
+    buy_reason: str(p.buy_reason),
+    sell_reason: str(p.sell_reason),
+    // 兼容旧字段（旧数据/旧后端仍发 first/last 时保留，供展示层降级）
     first_buy_date: str(p.first_buy_date),
     last_sell_date: str(p.last_sell_date),
-    holding_days: nullableOrNull(p.holding_days),
   };
 }
 

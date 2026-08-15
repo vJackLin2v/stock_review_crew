@@ -622,11 +622,15 @@ def run_replay(start: Optional[str] = None, end: Optional[str] = None,
                 # 计划显式给出股数（qty）时优先于仓位成数折算（A4 契约）
                 result = acct_engine.place_order(
                     acct, code, name, side, target, cheng, day_quote,
-                    qty=qty, conditional=conditional)
+                    qty=qty, conditional=conditional,
+                    buy_reason=plan.get("reason") if side == "buy" else None,
+                    sell_reason="主动卖出" if side == "sell" else None)
             else:
                 result = acct_engine.place_order(
                     acct, code, name, side, target, cheng, day_quote,
-                    conditional=conditional)
+                    conditional=conditional,
+                    buy_reason=plan.get("reason") if side == "buy" else None,
+                    sell_reason="主动卖出" if side == "sell" else None)
             if result.ok:
                 # engine 通常已把成交记录写入 acct["trades"]；若调用方引擎未写
                 # （如测试注入的假引擎）则兜底追加；并补 balance_after 兼容别名
@@ -852,7 +856,9 @@ def settle_plans(rec_date: str, settle_date: str,
             )
         result = acct_engine.place_order(
             acct, code, name, side, target, cheng, day_quote,
-            qty=qty if qty > 0 else None, conditional=conditional)
+            qty=qty if qty > 0 else None, conditional=conditional,
+            buy_reason=p.get("reason") if side == "buy" else None,
+            sell_reason="主动卖出" if side == "sell" else None)
         if result.ok:
             filled += 1
             if result.trade is not None:

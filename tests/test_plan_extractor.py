@@ -168,6 +168,7 @@ def test_buy_with_reason_tail(monkeypatch, data_dir):
     assert d["position_cheng"] == 1 and d["qty"] is None
     assert d["source"] == "regex_cheng"
     assert d["name"] == "002172", "名称缺失落盘用 code"
+    assert d["reason"] == "医疗服务2板龙头、医药主线净流入43亿", "原因应被提取到 plan.reason"
     assert len(tool_log) == 1 and tool_log[0]["type"] == "place_order_auto"
     assert tool_log[0]["code"] == "002172" and tool_log[0]["side"] == "buy"
 
@@ -184,6 +185,7 @@ def test_buy_with_reason_tail_and_prefix(monkeypatch, data_dir):
     assert abs(d["target_price"] - 3.90) < 1e-9
     assert d["position_cheng"] == 1 and d["qty"] is None
     assert d["source"] == "regex_cheng"
+    assert d["reason"] == "医疗服务2板龙头"
     assert len(tool_log) == 1 and tool_log[0]["type"] == "place_order_auto"
     assert tool_log[0]["code"] == "002172" and tool_log[0]["side"] == "buy"
 
@@ -200,5 +202,6 @@ def test_sell_with_reason_tail_still_parses(monkeypatch, data_dir):
     assert abs(d["target_price"] - 12.50) < 1e-9
     assert d["position_cheng"] == 3 and d["qty"] is None
     assert d["source"] == "regex_cheng"
+    assert d["reason"] == "冲高兑现", "卖出行原因也提取（防御），供 sell_reason 参考"
     assert len(tool_log) == 1 and tool_log[0]["type"] == "place_order_auto"
     assert tool_log[0]["side"] == "sell"

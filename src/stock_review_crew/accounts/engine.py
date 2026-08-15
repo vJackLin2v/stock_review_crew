@@ -139,6 +139,8 @@ def place_order(
     qty: Optional[int] = None,
     *,
     conditional: Optional[dict] = None,
+    buy_reason: Optional[str] = None,
+    sell_reason: Optional[str] = None,
 ) -> TradeResult:
     """下单（口径用户已确认）：
     - 目标价 ≥ 涨停价 → 拒买（涨停买不进）；目标价 ≤ 跌停价 → 拒卖；
@@ -153,6 +155,8 @@ def place_order(
     trailing_drawdown}，成交时挂到持仓（供 check_conditional_orders 每日机械执行）；
     trailing_drawdown → 移动止盈（§六），买入成交时初始化 peak_high=None；
     缺省/为 None → 引擎不挂（调用方负责按默认 0.95/1.10/13 传入）。
+    buy_reason/sell_reason：成交记录的买入/卖出理由（requirements-trades-fix §二.2）；
+    撮合调用方从 plan.reason 传入；直接调用（无 plan）传 None（默认）。
     """
     try:
         date = str(day.get("date") or "")
@@ -268,6 +272,8 @@ def place_order(
                 "price": target, "amount": amount, "fee": fee,
                 "stamp_tax": 0.0, "transfer_fee": tf,
                 "status": "成交", "reject_reason": "", "cash_after": acct["cash"],
+                "buy_reason": buy_reason,
+                "sell_reason": None,
             }
             acct.setdefault("trades", []).append(trade)
             return TradeResult(True, "", trade)
@@ -313,6 +319,8 @@ def place_order(
             "stamp_tax": stamp, "transfer_fee": tf,
             "status": "成交", "reject_reason": "", "cash_after": acct["cash"],
             "realized": realized,  # 单笔已实现盈亏（含费用），供胜率/盈亏比统计
+            "buy_reason": None,
+            "sell_reason": sell_reason,
         }
         acct.setdefault("trades", []).append(trade)
         return TradeResult(True, "", trade)
@@ -323,6 +331,14 @@ def place_order(
 DEFAULT_STOP_LOSS_RATE = 0.95
 DEFAULT_TAKE_PROFIT_RATE = 1.10
 DEFAULT_MAX_HOLD_DAYS = 13
+
+# 条件单 reason（condition 字段值）→ 中文卖出理由（requirements-trades-fix §二.2）
+CONDITION_SELL_REASON: dict[str, str] = {
+    "stop_loss": "止损",
+    "take_profit": "止盈",
+    "trailing_take_profit": "移动止盈",
+    "timeout": "持有超时",
+}
 
 
 def apply_conditional_defaults(conditional: Optional[dict], buy_price: float) -> dict:
@@ -375,7 +391,9 @@ def _conditional_sell_record(acct: dict, pos: dict, code: str, price: float,
     """条件单卖出落账（与 place_order 卖出相同费用/realized 口径，R12 一致）：
     佣金 万2.5 最低 5、过户费 0.001% 双向、印花税 卖出 0.05%；
     realized = (成交价−avg_cost)×数量−费用；更新 cash/positions/realized_pnl；
-    写入 acct["trades"] 并返回 trade 记录。"""
+    写入 acct["trades"] 并返回 trade 记录。
+    reason = condition 值（"stop_loss"/"take_profit"/"trailing_take_profit"/"timeout"）；
+    sell_reason 写中文文案（止损/止盈/移动止盈/持有超时），condition 字段兼容保留。"""
     amount = round(price * qty, 6)
     fee = _commission(amount)
     stamp = _stamp_tax(amount)
@@ -397,6 +415,9 @@ def _conditional_sell_record(acct: dict, pos: dict, code: str, price: float,
         "realized": realized,
         "balance_after": round(acct["cash"], 6),
         "condition": str(reason) if reason else "conditional_order",
+        "buy_reason": None,
+        "sell_reason": CONDITION_SELL_REASON.get(reason)
+        if reason in CONDITION_SELL_REASON else ("条件单卖出" if reason else None),
     }
     acct.setdefault("trades", []).append(trade)
     return trade
@@ -613,7 +634,8 @@ def trade_stats(acct: dict) -> dict:
             while sell_qty > 0 and q:
                 bd, bq = q[0]
                 take = min(bq, sell_qty)
-                hold_days.append((d - bd).days)
+                # 持仓天数含买入当天（买入日=第 1 天）：(卖出日−买入日).days + 1
+                hold_days.append((d - bd).days + 1)
                 sell_qty -= take
                 if take >= bq:
                     q.popleft()
@@ -628,24 +650,37 @@ def trade_stats(acct: dict) -> dict:
 
 
 def closed_trades(acct: dict) -> list[dict]:
-    """历史持仓（已平仓）：已全部卖出（buy_qty == sell_qty）且当前无持仓的股票，
-    返回完整买卖周期与盈亏（字段契约见 requirements-r12 补充，前端按此消费）：
-    {code, name, buy_qty, sell_qty, avg_buy_price, avg_sell_price, realized_pnl,
-     first_buy_date, last_sell_date, holding_days}
+    """历史持仓（已平仓）· 按「清仓周期」（requirements-trades-fix §三.3，已确认口径）。
+
+    一个股票从「首次买入」开始，到「持仓清零（累计买入数量 == 累计卖出数量）」为止
+    = 一个完整清仓周期，生成**一条**历史持仓记录；期间的部分卖出、加仓都算同一周期
+    （只要没卖完就一直统计，不提前闭合）；周期结束（清仓）后再次买入 = 新周期 =
+    新的独立记录。同一股票多次买卖 → 多笔独立记录（各自持仓天数/盈亏/收益率，不聚合）。
+
+    闭合记录字段契约（前端 closed_positions 按此消费）：
+    {code, name, buy_date(=周期首买日), sell_date(=周期末卖日), buy_qty, sell_qty,
+     avg_buy_price, avg_sell_price, buy_amount, realized_pnl, holding_days,
+     buy_reason, sell_reason}
+
     - 只统计 trades 中 status == 「成交」的记录；realized 缺失按 0；
-    - 已平仓判定：buy_qty > 0 且 buy_qty == sell_qty，且该 code 不在 positions
-      （或 positions[code].qty == 0）；
-    - avg_buy_price = buy_amount/buy_qty、avg_sell_price = sell_amount/sell_qty（round 6）；
-      realized_pnl = Σ sell.realized（round 6）；holding_days = (末卖日 − 首买日).days 自然日；
-    - 按 last_sell_date 倒序（最近卖出在前）；日期缺失/解析失败跳过该字段不报错；
+    - 按 code 独立维护当前周期累计（首买日/买买量/卖出量/金额），日期升序遍历；
+    - 闭合判定：累计买入数量 == 累计卖出数量（引擎禁止裸卖空 → 清仓即相等）；
+      闭合时生成一条记录并重置该 code 周期（下次买入开新周期）；
+    - 手动账号可能以「期初持仓卖出」开头（卖出前无买入）→ 该卖出无法配对周期，跳过；
+    - avg_buy_price = 周期内买入总额/买入总量、avg_sell_price = 周期内卖出总额/卖出总量
+      （round 6）；buy_amount = 周期内买入总额；realized_pnl = 周期内各卖出 realized 之和；
+    - buy_reason = 周期首买的理由、sell_reason = 周期末卖（清仓卖）的理由（None 保留）；
+    - holding_days = (末卖日 − 首买日).days + 1（含首末两天）；
+    - 按 sell_date 倒序（最近卖出在前）；日期解析失败 → holding_days=None 不报错；
     - 绝不抛异常（异常/无数据 → []）。
     """
     try:
         from datetime import datetime
 
-        trades = [t for t in (acct.get("trades") or []) if t.get("status") == "成交"]
-        agg: dict[str, dict] = {}
-        for t in trades:
+        filled = []
+        for idx, t in enumerate(acct.get("trades") or []):
+            if t.get("status") != "成交":
+                continue
             code = str(t.get("code") or "")
             if not code:
                 continue
@@ -653,67 +688,81 @@ def closed_trades(acct: dict) -> list[dict]:
                 qty = int(t.get("qty") or 0)
             except (TypeError, ValueError):
                 qty = 0
+            if qty <= 0:
+                continue
             try:
                 amount = float(t.get("amount") or 0.0)
             except (TypeError, ValueError):
                 amount = 0.0
-            row = agg.setdefault(code, {
-                "buy_qty": 0,
-                "buy_amount": 0.0,
-                "sell_qty": 0,
-                "sell_amount": 0.0,
-                "sell_realized": 0.0,
-                "first_buy_date": None,
-                "last_sell_date": None,
-                "name": str(t.get("name") or code),
-            })
-            date = str(t.get("date") or "")
-            if t.get("side") == "buy":
-                row["buy_qty"] += qty
-                row["buy_amount"] += amount
-                if date and (row["first_buy_date"] is None or date < row["first_buy_date"]):
-                    row["first_buy_date"] = date
-            elif t.get("side") == "sell":
-                row["sell_qty"] += qty
-                row["sell_amount"] += amount
+            filled.append((str(t.get("date") or ""), idx, t, code, t.get("side"), qty, amount))
+        # 确定性：按日期升序（同日期按原顺序），与账户撮合时序一致
+        filled.sort(key=lambda x: (x[0], x[1]))
+
+        # code → 当前周期累计
+        cycles: dict[str, dict] = {}
+        result: list[dict] = []
+        for date_str, _idx, t, code, side, qty, amount in filled:
+            if side == "buy":
+                cyc = cycles.get(code)
+                if cyc is None or cyc["closed"]:
+                    cyc = {
+                        "buy_date": date_str,
+                        "sell_date": None,
+                        "buy_qty": 0,
+                        "buy_amount": 0.0,
+                        "sell_qty": 0,
+                        "sell_amount": 0.0,
+                        "realized": 0.0,
+                        "name": str(t.get("name") or code),
+                        "buy_reason": t.get("buy_reason"),
+                        "sell_reason": None,
+                        "closed": False,
+                    }
+                    cycles[code] = cyc
+                cyc["buy_qty"] += qty
+                cyc["buy_amount"] += amount
+            elif side == "sell":
+                cyc = cycles.get(code)
+                if cyc is None or cyc["closed"]:
+                    continue  # 期初持仓卖出（买入前卖出），无法配对周期，跳过
+                cyc["sell_qty"] += qty
+                cyc["sell_amount"] += amount
+                cyc["sell_date"] = date_str
+                cyc["sell_reason"] = t.get("sell_reason")
                 try:
                     realized = float(t.get("realized") or 0.0)
                 except (TypeError, ValueError):
                     realized = 0.0
-                row["sell_realized"] += realized
-                if date and (row["last_sell_date"] is None or date > row["last_sell_date"]):
-                    row["last_sell_date"] = date
-
-        positions = acct.get("positions") or {}
-        result: list[dict] = []
-        for code, row in agg.items():
-            if row["buy_qty"] <= 0 or row["buy_qty"] != row["sell_qty"]:
-                continue  # 未平仓（含只买不卖 / 部分卖出）
-            pos = positions.get(code)
-            if pos is not None and int(pos.get("qty") or 0) != 0:
-                continue  # 仍有持仓，不算历史持仓
-            holding_days = None
-            if row["first_buy_date"] and row["last_sell_date"]:
-                try:
-                    d1 = datetime.strptime(row["first_buy_date"], "%Y-%m-%d")
-                    d2 = datetime.strptime(row["last_sell_date"], "%Y-%m-%d")
-                    holding_days = (d2 - d1).days
-                except ValueError:
-                    holding_days = None  # 日期异常跳过该字段，不报错
-            result.append({
-                "code": code,
-                "name": row["name"] or code,
-                "buy_qty": row["buy_qty"],
-                "sell_qty": row["sell_qty"],
-                "avg_buy_price": round(row["buy_amount"] / row["buy_qty"], 6),
-                "avg_sell_price": round(row["sell_amount"] / row["sell_qty"], 6)
-                if row["sell_qty"] else 0.0,
-                "realized_pnl": round(row["sell_realized"], 6),
-                "first_buy_date": row["first_buy_date"],
-                "last_sell_date": row["last_sell_date"],
-                "holding_days": holding_days,
-            })
-        result.sort(key=lambda r: r["last_sell_date"] or "", reverse=True)
+                cyc["realized"] += realized
+                # 清仓：累计买入 == 累计卖出 → 闭合周期，生成记录并重置
+                if cyc["buy_qty"] == cyc["sell_qty"]:
+                    holding_days = None
+                    if cyc["buy_date"] and cyc["sell_date"]:
+                        try:
+                            d1 = datetime.strptime(cyc["buy_date"], "%Y-%m-%d")
+                            d2 = datetime.strptime(cyc["sell_date"], "%Y-%m-%d")
+                            holding_days = (d2 - d1).days + 1  # 含首末两天
+                        except (ValueError, TypeError):
+                            holding_days = None
+                    result.append({
+                        "code": code,
+                        "name": cyc["name"] or code,
+                        "buy_date": cyc["buy_date"],
+                        "sell_date": cyc["sell_date"],
+                        "buy_qty": cyc["buy_qty"],
+                        "sell_qty": cyc["sell_qty"],
+                        "avg_buy_price": round(cyc["buy_amount"] / cyc["buy_qty"], 6)
+                        if cyc["buy_qty"] else 0.0,
+                        "avg_sell_price": round(cyc["sell_amount"] / cyc["sell_qty"], 6)
+                        if cyc["sell_qty"] else 0.0,
+                        "buy_amount": round(cyc["buy_amount"], 6),
+                        "realized_pnl": round(cyc["realized"], 6),
+                        "holding_days": holding_days,
+                        "buy_reason": cyc["buy_reason"],
+                        "sell_reason": cyc["sell_reason"],
+                    })
+                    cyc["closed"] = True
+        result.sort(key=lambda r: r["sell_date"] or "", reverse=True)
         return result
     except Exception:  # noqa: BLE001 - 绝不抛异常
         return []

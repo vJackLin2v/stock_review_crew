@@ -5,6 +5,8 @@
 - plan.json = {date, mode, generated_at, plans[]}；同日重跑整文件覆盖；
 - plans[].rec_date / skill_id / skill_name / code / name / side /
   target_price / position_cheng / qty / source；qty=None 序列化为 JSON null；
+- plans[].reason（可选字符串）：分析师「原因是XXX」提取的买入/卖出理由，撮合时写入
+  trade 的 buy_reason（买入）／作为 sell_reason 参考；缺失/无文本 → None（JSON null）；
 - plans[].stop_loss / take_profit / max_hold_days / trailing_drawdown（可选出条件字段，
   requirements-trading-v1 §三/§六）；stop_loss/take_profit/max_hold_days 均可缺省，
   缺省在撮合入口按 买入价×0.95 / 买入价×1.10 / 13 计算；trailing_drawdown 提供 → 移动
@@ -119,6 +121,9 @@ class PlanRec:
     position_cheng: float = 0.0
     qty: Optional[int] = None
     source: str = "tool"
+    # 买入/卖出理由（分析师「原因是XXX」，撮合时写入 trade.buy_reason / 参考 sell_reason）：
+    # 可选自由文本，None=有该计划但无明确理由
+    reason: Optional[str] = None
     # 条件单字段（requirements-trading-v1 §三，均可选，None=走引擎默认）：
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
@@ -143,6 +148,7 @@ class PlanRec:
             position_cheng=_as_float(d.get("position_cheng", 0) or 0, "position_cheng"),
             qty=_as_qty(d.get("qty")),
             source=str(d.get("source") or "").strip(),
+            reason=_as_optional_reason(d.get("reason")),
             stop_loss=_as_optional_float(d.get("stop_loss"), "stop_loss"),
             take_profit=_as_optional_float(d.get("take_profit"), "take_profit"),
             max_hold_days=_as_optional_int(d.get("max_hold_days"), "max_hold_days"),
@@ -180,6 +186,7 @@ class PlanRec:
             "position_cheng": self.position_cheng,
             "qty": self.qty,
             "source": self.source,
+            "reason": self.reason,
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
             "max_hold_days": self.max_hold_days,
@@ -220,6 +227,14 @@ def _as_optional_int(value: Any, field: str) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field} 必须是整数，收到：{value!r}") from exc
+
+
+def _as_optional_reason(value: Any) -> Optional[str]:
+    """可选理由文本：None/空串/纯空白/缺失 → None；否则去首尾空白原样保留。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _as_qty(value: Any) -> Optional[float]:
