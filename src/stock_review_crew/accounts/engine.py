@@ -678,7 +678,7 @@ def closed_trades(acct: dict) -> list[dict]:
         from datetime import datetime
 
         filled = []
-        for idx, t in enumerate(acct.get("trades") or []):
+        for _idx, t in enumerate(acct.get("trades") or []):
             if t.get("status") != "成交":
                 continue
             code = str(t.get("code") or "")
@@ -694,14 +694,15 @@ def closed_trades(acct: dict) -> list[dict]:
                 amount = float(t.get("amount") or 0.0)
             except (TypeError, ValueError):
                 amount = 0.0
-            filled.append((str(t.get("date") or ""), idx, t, code, t.get("side"), qty, amount))
-        # 确定性：按日期升序（同日期按原顺序），与账户撮合时序一致
-        filled.sort(key=lambda x: (x[0], x[1]))
+            filled.append((str(t.get("date") or ""), t, code, t.get("side"), qty, amount))
+        # 按账户存储顺序（引擎/replay 按交易日时序追加，即撮合时序），
+        # 不按日期字符串重排 —— 非法日期（非 YYYY-MM-DD）与合法日期混排时
+        # 仍保持买入在前/卖出在后的真实时序，避免字符串排序错乱。
 
         # code → 当前周期累计
         cycles: dict[str, dict] = {}
         result: list[dict] = []
-        for date_str, _idx, t, code, side, qty, amount in filled:
+        for date_str, t, code, side, qty, amount in filled:
             if side == "buy":
                 cyc = cycles.get(code)
                 if cyc is None or cyc["closed"]:
