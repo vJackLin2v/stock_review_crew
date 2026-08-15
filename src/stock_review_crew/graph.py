@@ -15,6 +15,7 @@ import json
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
@@ -58,10 +59,11 @@ __all__ = [
 _progress_var: Any = None
 _last_pct_var: Any = None
 _progress_lock: Any = None
+_analyst_events_var: Any = None
 
 
 def _progress_context() -> None:
-    global _progress_var, _last_pct_var, _progress_lock
+    global _progress_var, _last_pct_var, _progress_lock, _analyst_events_var
     import contextvars
     import threading
 
@@ -72,13 +74,28 @@ def _progress_context() -> None:
         # 完成顺序不同时进度会倒挂（实测 sentiment 40→35，test_progress_stages_monotonic 偶发失败）
         _last_pct_var = contextvars.ContextVar("review_last_pct", default={"last": 0.0})
         _progress_lock = threading.Lock()
+        # 2026-08-16（回测耗时采集）：分析师粒度 started/finished 子事件开关——
+        # 默认关。开启后引擎回调收到 4 参（带 meta）；关闭时 _run_analysts 不发射该
+        # 子事件，杜绝「既有 3 参回调/测试替换 _emit」被 meta 关键字破坏。
+        _analyst_events_var = contextvars.ContextVar("review_analyst_events", default=False)
 
 
-def set_progress_callback(callback):
-    """注册进度回调 callback(stage, pct, message)；None 表示关闭。"""
+def set_progress_callback(callback, analyst_events: bool = False):
+    """注册进度回调 callback(stage, pct, message[, meta])；None 表示关闭。
+
+    analyst_events=True 时，分析师 started/finished 子事件以 4 参（带 meta）上报
+    给回调；False（默认）时不发射分析师子事件（回测编排器显式开启）。
+    """
     _progress_context()
     _progress_var.set(callback)
     _last_pct_var.set({"last": 0.0})
+    _analyst_events_var.set(bool(analyst_events))
+
+
+def _analyst_sub_events_enabled() -> bool:
+    """当前构建是否开启分析师粒度子事件（供 _run_analysts 决定是否发射 meta 事件）。"""
+    _progress_context()
+    return bool(_analyst_events_var.get())
 
 
 def _reset_progress():
@@ -86,11 +103,15 @@ def _reset_progress():
     _last_pct_var.set({"last": 0.0})
 
 
-def _emit(stage, pct, message):
+def _emit(stage, pct, message, meta=None):
     """进度钩子：pct 单调递增（clamp 到上一次值），回调异常不影响主流程。
 
     2026-08-12：clamp 状态为 job 内共享 dict + 锁——并行分析师线程各自 copy_context
-    后仍读写同一状态，跨线程单调（此前各线程独立副本可倒挂）。"""
+    后仍读写同一状态，跨线程单调（此前各线程独立副本可倒挂）。
+    2026-08-16（回测耗时采集）：meta 可选。当 meta 非 None 时回调以 4 参调用
+    ``callback(stage, pct, message, meta)``，供回测编排器采集分析师粒度耗时等子事件；
+    meta 为 None 时仍以既有 3 参 ``callback(stage, pct, message)`` 调用，绝不破坏
+    既有 3 参回调（如测试里的 3 参 lambda / 单日 job 的 _progress_cb 契约）。"""
     try:
         _progress_context()
         pct = float(pct)
@@ -101,7 +122,10 @@ def _emit(stage, pct, message):
             state["last"] = pct
         callback = _progress_var.get()
         if callback is not None:
-            callback(stage, pct, message)
+            if meta is not None:
+                callback(stage, pct, message, meta)
+            else:
+                callback(stage, pct, message)
     except Exception:
         pass
 
@@ -1287,6 +1311,18 @@ def _run_analysts(state):
 
     def _invoke_one(skill, index):
         group = _group_of(skill)
+        # 2026-08-16（回测耗时采集）：分析师 started/finished 子事件带 skill_id/name，
+        # 供回测编排器通过 4 参进度回调汇总成 stages["analysts"].analysts[]。
+        # 仅在本次构建显式开启分析师子事件（analyst_events=True，回测编排器用）时
+        # 发射——否则静默（不破坏既有 3 参回调 / 测试直接替换 graph._emit 的场景）。
+        _a_skill_id = skill.get("id", "")
+        _a_name = skill.get("name", "")
+        _emit_analyst = _analyst_sub_events_enabled()
+        if _emit_analyst:
+            _emit("analyst", 20, f"分析师 {_a_name or _a_skill_id} 开始（{index}）",
+                  meta={"type": "analyst", "event": "started", "skill_id": _a_skill_id,
+                        "name": _a_name, "index": index})
+        _t0 = time.monotonic()
         entry = None
         if _llm_ready():
             # 2026-08-10 兜底：LLM 偶发失败（超时/网络/限流）时重试 2 次，
@@ -1303,6 +1339,10 @@ def _run_analysts(state):
                     _time.sleep(5 * (_attempt + 1))
         if entry is None:
             entry = _rule_analyst(state, skill, group)
+        if _emit_analyst:
+            _emit("analyst", 20, f"分析师 {_a_name or _a_skill_id} 完成（{index}）",
+                  meta={"type": "analyst", "event": "finished", "skill_id": _a_skill_id,
+                        "name": _a_name, "index": index, "elapsed_ms": int((time.monotonic() - _t0) * 1000)})
         return entry
 
     results = []
@@ -1744,9 +1784,12 @@ def default_initial_state(date, mode=DEFAULT_MODE, max_rounds=3,
     }
 
 
-def build_graph(progress_callback=None):
-    """构建并编译 LangGraph：fetch → validate → news → analysts → host → report。"""
-    set_progress_callback(progress_callback)
+def build_graph(progress_callback=None, analyst_events: bool = False):
+    """构建并编译 LangGraph：fetch → validate → news → analysts → host → report。
+
+    analyst_events=True 时注册「分析师粒度子事件」上报（回测编排器耗时采集用）。
+    """
+    set_progress_callback(progress_callback, analyst_events=analyst_events)
     _reset_progress()
     graph = StateGraph(ReviewState)
 

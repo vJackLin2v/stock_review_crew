@@ -209,9 +209,16 @@ def _prune_jobs(now: Optional[float] = None) -> None:
 
 
 def _progress_cb(job_id: str):
-    """构造引擎进度回调：analysts n/5 解析为 analysts_done/total（R15/R2 统一阶段）。"""
+    """构造引擎进度回调：analysts n/5 解析为 analysts_done/total（R15/R2 统一阶段）。
 
-    def progress(stage: str, pct: float, message: str) -> None:
+    2026-08-16：接受可选第 4 参 meta（graph 分析师粒度子事件携带）。单日 job 不采集
+    分析师耗时，且分析师子事件（meta.type == "analyst"）不应污染 job 的 stage 字段
+    （否则终态 stage 会被覆盖成 "analyst"），故直接忽略；只做既有 n/5 解析与状态更新，
+    契约不变。"""
+
+    def progress(stage: str, pct: float, message: str, meta: Any = None) -> None:
+        if isinstance(meta, dict) and meta.get("type") == "analyst":
+            return  # 分析师粒度子事件：单日 job 不采集、不污染 stage
         updates: dict[str, Any] = {"stage": stage, "pct": pct, "message": message}
         mt = re.search(r"(\d+)/(\d+)", str(message or ""))
         if mt and stage == "analysts":
@@ -338,115 +345,218 @@ def _snapshot_sources(engine_snapshot: Any) -> list[str]:
 # 复盘任务
 # ═══════════════════════════════════════════════════════════════
 
-def _run_review_job(job_id: str, date: str, mode: str, max_rounds: int, trace: bool = True) -> None:
-    """后台任务线程（daemon）：上下文注入 → 引擎 → 落盘 → done；任何异常 → error 中文。"""
-    try:
-        # 初始阶段用契约阶段序列首项 fetch（§五：取数/资讯/趋势派/情绪派/主持人/辩论/报告/完成）
-        _update(job_id, status="running", stage="fetch", pct=1, message="正在注入历史上下文并拉取行情…")
-        ctx = reviews.context(date, mode)
-        initial = graph.default_initial_state(
-            date,
-            mode=mode,
-            max_rounds=max_rounds,
-            yesterday_report=_yesterday_report_text(ctx.get("yesterday")),
-            earlier_today="\n".join(
-                _context_item_text(item) for item in (ctx.get("earlier_today") or [])
-            ),
-        )
-        # 2026-08-10：进度钩子已改 ContextVar（每 job 独立上下文），多任务可并发执行
-        # R14 A1：清空当日计划 registry，保证同日重跑整文件覆盖、无残留旧计划
-        from stock_review_crew.accounts import plan as plan_store
+def _new_timing_tracker():
+    """阶段/分析师耗时采集器：从进度回调事件流结算耗时（time.monotonic()，ms 精度）。
 
-        plan_store.reset(date)
-        compiled = graph.build_graph(progress_callback=_progress_cb(job_id))
-        # 2026-08-12：LLM 级 Langfuse 回调按 job 开关——前端页面复盘（trace=true）
-        # 开启，面板可见全流程（LLM 调用/取数等子 span）；脚本批量（trace=false）关闭
-        # （性能 + 不刷屏）。ContextVar 随分析师线程池 copy_context 传播，并发 job 互不干扰。
-        with config.langfuse_callbacks_scope(trace):
-            state = compiled.invoke(initial)
-        report_dict = graph.build_result(state)
+    返回 (track, stage_timings, analyst_timings)：
+    - track(stage, pct, message, meta)：注入一条进度事件，内部结算阶段切换与
+      分析师 started/finished 子事件（meta.type == "analyst"）；
+    - stage_timings：{stage: {"started_at": float秒, "elapsed_ms": int}}；
+    - analyst_timings：{skill_id: {"skill_id", "name", "started_at", "elapsed_ms"}}。
+    仅在事件流包含 meta 的分析师事件且活动阶段为 analysts 时采集分析师耗时，
+    阶段事件（无 meta）只结算阶段切换。
+    """
+    stage_timings: dict[str, dict[str, Any]] = {}
+    analyst_timings: dict[str, dict[str, Any]] = {}
+    _active: Optional[str] = None
+    _active_start: Optional[float] = None
 
-        # Q4（R10）：Langfuse 质量 trace + 确定性 rubric 评分（无凭据自动 no-op，绝不阻塞）
-        # 2026-08-12：trace 开关——脚本批量复盘传 trace=false 跳过 Langfuse（页面默认 true）
-        quality_summary: Optional[dict] = None
-        if trace:
+    def _close(now: float) -> None:
+        nonlocal _active, _active_start
+        if _active is not None and _active_start is not None:
+            prev = stage_timings.setdefault(_active, {})
+            prev["started_at"] = _active_start
+            prev["elapsed_ms"] = int((now - _active_start) * 1000)
+        _active = None
+        _active_start = None
+
+    def track(stage: str, pct: float, message: str, meta: Any = None) -> None:
+        nonlocal _active, _active_start
+        # 分析师子事件：只在运行中的 analysts 阶段结算 skill 粒度耗时，不切换阶段
+        if isinstance(meta, dict) and meta.get("type") == "analyst":
+            sid = str(meta.get("skill_id") or "")
+            if not sid:
+                return
+            at = analyst_timings.setdefault(sid, {"skill_id": sid,
+                                                  "name": str(meta.get("name") or sid),
+                                                  "started_at": None, "elapsed_ms": None})
+            if meta.get("event") == "started":
+                at["started_at"] = time.monotonic()
+            elif meta.get("event") == "finished" and at.get("started_at") is not None:
+                at["elapsed_ms"] = int((time.monotonic() - at["started_at"]) * 1000)
+            return
+        # 阶段事件：stage 变化时结算上一阶段
+        now = time.monotonic()
+        if stage != _active:
+            _close(now)
+            _active = stage
+            _active_start = now
+
+    return track, stage_timings, analyst_timings
+
+
+def run_review_day(date: str, mode: str, max_rounds: int, trace: bool = True,
+                   progress_cb=None, timing_cb=None) -> dict[str, Any]:
+    """可复用单日复盘核心（单日 job 与历史回测编排器共用）。
+
+    上下文注入 → plan.reset → build_graph(invoke) → build_result → save_review →
+    plan.finalize；落盘成功后返回产品 dict。任何异常向上抛（DataValidationError /
+    Exception），由调用方决定处理（job 记 error / 回测记 failed+重试+fail-fast）。
+
+    Args:
+        date: YYYY-MM-DD。
+        mode: 复盘模式（close 等）。
+        max_rounds: 辩论轮数上限（1-3）。
+        trace: 是否写 Langfuse 复盘级 trace（脚本批量 false，页面 true）。
+        progress_cb: 引擎进度回调（可选；单日 job 传 _progress_cb(job_id)）。
+        timing_cb: 阶段/分析师耗时采集钩子，每事件回调
+            ``timing_cb(stage, pct, message, meta)``（可选，回测编排器用）。
+            注意：进度回调本身也可承载 meta（4 参回调），二选一即可。
+
+    Returns:
+        {"record_id", "meta", "report", "snapshot", "quality",
+         "stage_timings", "analyst_timings"}。
+    """
+    ctx = reviews.context(date, mode)
+    initial = graph.default_initial_state(
+        date,
+        mode=mode,
+        max_rounds=max_rounds,
+        yesterday_report=_yesterday_report_text(ctx.get("yesterday")),
+        earlier_today="\n".join(
+            _context_item_text(item) for item in (ctx.get("earlier_today") or [])
+        ),
+    )
+    # 2026-08-10：进度钩子已改 ContextVar（每 job 独立上下文），多任务可并发执行
+    # R14 A1：清空当日计划 registry，保证同日重跑整文件覆盖、无残留旧计划
+    from stock_review_crew.accounts import plan as plan_store
+
+    plan_store.reset(date)
+    track, stage_timings, analyst_timings = _new_timing_tracker()
+
+    def _cb(stage: str, pct: float, message: str, meta: Any = None) -> None:
+        # 统一进耗时采集器（stage 结算 + 分析师子事件结算）
+        track(stage, pct, message, meta)
+        if timing_cb is not None:
             try:
-                from stock_review_crew import quality
+                timing_cb(stage, pct, message, meta)
+            except Exception:  # noqa: BLE001 - 耗时采集异常不影响复盘主流程
+                pass
+        if progress_cb is not None:
+            progress_cb(stage, pct, message, meta)
 
-                degraded_notes = list(state.get("degraded_notes") or [])
-                trace_id = quality.trace_review(
-                    "done",
-                    {
-                        "date": date,
-                        "mode": mode,
-                        "degraded": degraded_notes,
-                        "report_head": (report_dict.get("final_report") or "")[:2000],
-                    },
-                    metadata={
-                        "date": date,
-                        "mode": mode,
-                        "mode_label": MODE_LABELS.get(mode, mode),
-                        "degraded": degraded_notes,
-                    },
-                )
-                quality_summary = quality.score_review(
-                    report_dict.get("final_report") or "",
-                    _quality_structured(state.get("snapshot") or {}),
-                    {
-                        "sections": list(MODE_INFO.get(mode, {}).get("sections", [])),
-                        "degraded": degraded_notes,
-                    },
-                    trace_id,
-                )
-            except Exception as exc:  # noqa: BLE001 - 质量评估失败不影响复盘交付
-                logger.warning("复盘质量评估跳过（不影响结果）：%s", exc)
+    compiled = graph.build_graph(progress_callback=_cb, analyst_events=True)
+    # 2026-08-12：LLM 级 Langfuse 回调按 job 开关——前端页面复盘（trace=true）
+    # 开启，面板可见全流程（LLM 调用/取数等子 span）；脚本批量（trace=false）关闭
+    # （性能 + 不刷屏）。ContextVar 随分析师线程池 copy_context 传播，并发 job 互不干扰。
+    with config.langfuse_callbacks_scope(trace):
+        state = compiled.invoke(initial)
+    report_dict = graph.build_result(state)
 
-        now = datetime.now()
-        meta = {
-            "date": date,
-            "mode": mode,
-            "mode_label": MODE_LABELS.get(mode, mode),
-            "time": now.strftime("%H%M%S"),
-            "created_at": now.isoformat(timespec="seconds"),
-            "degraded": list(state.get("degraded_notes") or []),
-            "sources": _snapshot_sources(state.get("snapshot")),
-            "disclaimer": DISCLAIMER,
-            "summary": _make_summary(report_dict.get("final_report", ""), mode, date),
-        }
-        # R12：各分析师模拟账户快照（附加字段，报告 Markdown 正文不变）
-        _accounts = state.get("analyst_accounts") or {}
-        if _accounts:
-            meta["accounts"] = _accounts
-        from backend.snapshot import _to_frontend_snapshot  # noqa: E402 - 快照转换模块（叶子依赖）
-
-        snapshot = _to_frontend_snapshot(state.get("snapshot") or {})
-        record_id: Optional[str] = None
+    # Q4（R10）：Langfuse 质量 trace + 确定性 rubric 评分（无凭据自动 no-op，绝不阻塞）
+    # 2026-08-12：trace 开关——脚本批量复盘传 trace=false 跳过 Langfuse（页面默认 true）
+    quality_summary: Optional[dict] = None
+    if trace:
         try:
-            record_id = reviews.save_review(meta, report_dict, snapshot)
-        except Exception as exc:  # 磁盘写失败：记录错误，不阻塞任务完成
-            logger.warning("复盘落盘失败（不阻塞返回）：%s", exc)
-            meta.setdefault("degraded", []).append(f"复盘记录落盘失败：{exc}")
-        # R14 A1：invoke 完成后单点落盘 plan.json（唯一真源）。
-        # 注意：必须在 save_review **之后**执行——save_review 会归档旧目录
-        # （2026-08-11 实测：finalize 在 save_review 前会把 plan.json 一起归档到
-        # output/archive/，导致批跑校验 data/reviews/{date}/plan.json 缺失）。
-        # finalize 失败只追加 degraded 标注，绝不阻塞 job done
-        try:
-            plan_store.finalize(date, mode)
-        except Exception as exc:  # noqa: BLE001 - 计划落盘失败不阻塞任务完成
-            logger.warning("交易计划落盘失败（不阻塞任务完成）：%s", exc)
-            meta.setdefault("degraded", []).append(f"交易计划落盘失败：{exc}")
+            from stock_review_crew import quality
+
+            degraded_notes = list(state.get("degraded_notes") or [])
+            trace_id = quality.trace_review(
+                "done",
+                {
+                    "date": date,
+                    "mode": mode,
+                    "degraded": degraded_notes,
+                    "report_head": (report_dict.get("final_report") or "")[:2000],
+                },
+                metadata={
+                    "date": date,
+                    "mode": mode,
+                    "mode_label": MODE_LABELS.get(mode, mode),
+                    "degraded": degraded_notes,
+                },
+            )
+            quality_summary = quality.score_review(
+                report_dict.get("final_report") or "",
+                _quality_structured(state.get("snapshot") or {}),
+                {
+                    "sections": list(MODE_INFO.get(mode, {}).get("sections", [])),
+                    "degraded": degraded_notes,
+                },
+                trace_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - 质量评估失败不影响复盘交付
+            logger.warning("复盘质量评估跳过（不影响结果）：%s", exc)
+
+    now = datetime.now()
+    meta = {
+        "date": date,
+        "mode": mode,
+        "mode_label": MODE_LABELS.get(mode, mode),
+        "time": now.strftime("%H%M%S"),
+        "created_at": now.isoformat(timespec="seconds"),
+        "degraded": list(state.get("degraded_notes") or []),
+        "sources": _snapshot_sources(state.get("snapshot")),
+        "disclaimer": DISCLAIMER,
+        "summary": _make_summary(report_dict.get("final_report", ""), mode, date),
+    }
+    # R12：各分析师模拟账户快照（附加字段，报告 Markdown 正文不变）
+    _accounts = state.get("analyst_accounts") or {}
+    if _accounts:
+        meta["accounts"] = _accounts
+    from backend.snapshot import _to_frontend_snapshot  # noqa: E402 - 快照转换模块（叶子依赖）
+
+    snapshot = _to_frontend_snapshot(state.get("snapshot") or {})
+    record_id: Optional[str] = None
+    try:
+        record_id = reviews.save_review(meta, report_dict, snapshot)
+    except Exception as exc:  # 磁盘写失败：记录错误，不阻塞任务完成
+        logger.warning("复盘落盘失败（不阻塞返回）：%s", exc)
+        meta.setdefault("degraded", []).append(f"复盘记录落盘失败：{exc}")
+    # R14 A1：invoke 完成后单点落盘 plan.json（唯一真源）。
+    # 注意：必须在 save_review **之后**执行——save_review 会归档旧目录
+    # （2026-08-11 实测：finalize 在 save_review 前会把 plan.json 一起归档到
+    # output/archive/，导致批跑校验 data/reviews/{date}/plan.json 缺失）。
+    # finalize 失败只追加 degraded 标注，绝不阻塞 job done
+    try:
+        plan_store.finalize(date, mode)
+    except Exception as exc:  # noqa: BLE001 - 计划落盘失败不阻塞任务完成
+        logger.warning("交易计划落盘失败（不阻塞任务完成）：%s", exc)
+        meta.setdefault("degraded", []).append(f"交易计划落盘失败：{exc}")
+    # 结算最后活动阶段的耗时（done 阶段触发时已被 _close 结算；此处兜底当前阶段）
+    for _k, _v in stage_timings.items():
+        if _v.get("elapsed_ms") is None:
+            _v["elapsed_ms"] = 0
+    return {
+        "record_id": record_id,
+        "meta": meta,
+        "report": report_dict.get("final_report", ""),
+        "snapshot": snapshot,
+        "quality": quality_summary,
+        "stage_timings": stage_timings,
+        "analyst_timings": analyst_timings,
+    }
+
+
+def _run_review_job(job_id: str, date: str, mode: str, max_rounds: int, trace: bool = True) -> None:
+    """后台任务线程（daemon）：run_review_day 薄封装 → done/error（契约不变）。"""
+    try:
+        _update(job_id, status="running", stage="fetch", pct=1, message="正在注入历史上下文并拉取行情…")
+        result = run_review_day(
+            date, mode, max_rounds, trace,
+            progress_cb=_progress_cb(job_id),
+        )
         _update(
             job_id,
             status="done",
             pct=100,
             message="复盘完成",
             result={
-                "record_id": record_id,
-                "meta": meta,
-                "report": report_dict.get("final_report", ""),
-                "snapshot": snapshot,
-                "quality": quality_summary,
+                "record_id": result["record_id"],
+                "meta": result["meta"],
+                "report": result["report"],
+                "snapshot": result["snapshot"],
+                "quality": result["quality"],
             },
             _finished=time.monotonic(),
         )

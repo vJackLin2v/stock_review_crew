@@ -38,7 +38,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from backend import accounts_routes  # noqa: E402  # R12 模拟账户路由
+from backend import backtest  # noqa: E402  # 历史回测编排器（回测）
 from backend import jobs  # noqa: E402  # JOBS 状态 + 任务执行（拆分自 main）
+from backend import routes_backtest  # noqa: E402  # 回测编排路由（回测）
 from backend import routes_chat  # noqa: E402  # 聊天路由（拆分自 main）
 from backend import routes_data  # noqa: E402  # 行情/名称/自选路由（拆分自 main）
 from backend import routes_review  # noqa: E402  # 复盘/任务轮询路由（拆分自 main）
@@ -120,6 +122,7 @@ app.include_router(trades_routes.router)  # R11-R1 交割单分析：POST /api/t
 app.include_router(accounts_routes.router)  # R12 模拟账户：GET /api/accounts/*（A1）
 # 以下为拆分自 main.py 的路由（追加在 trades/accounts 之后，保持原有注册顺序）
 app.include_router(routes_review.router)  # 复盘：POST /api/reviews、GET /api/jobs/*、GET/DELETE /api/reviews/*
+app.include_router(routes_backtest.router)  # 回测：POST /api/backtest/start、GET /api/backtest/*
 app.include_router(routes_chat.router)  # 聊天：POST/GET/DELETE /api/chat/sessions[...]
 app.include_router(routes_data.router)  # 行情数据：/api/data/*、/api/watchlist
 _flatten_included_routers(app)
@@ -193,6 +196,7 @@ from backend.jobs import (  # noqa: E402
     _validate_date,
     _window_error,
     _yesterday_report_text,
+    run_review_day,
 )
 from backend.snapshot import (  # noqa: E402
     _INDEX_NAMES,
