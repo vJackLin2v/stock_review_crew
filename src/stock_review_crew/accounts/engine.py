@@ -149,8 +149,9 @@ def place_order(
     - 费用：佣金 万2.5 最低 5 元、过户费 0.001% 双向、印花税 卖出 0.05%；
     - 拒绝也完整记录（合规审计）。绝不抛异常。
     day = {date, pre_close, high, low, close}（当日行情；缺失 → 拒「行情数据不足」）。
-    conditional：买入可选条件单字段 {stop_loss, take_profit, max_hold_days}，
-    成交时挂到持仓（供 check_conditional_orders 每日机械执行）；
+    conditional：买入可选条件单字段 {stop_loss, take_profit, max_hold_days,
+    trailing_drawdown}，成交时挂到持仓（供 check_conditional_orders 每日机械执行）；
+    trailing_drawdown → 移动止盈（§六），买入成交时初始化 peak_high=None；
     缺省/为 None → 引擎不挂（调用方负责按默认 0.95/1.10/13 传入）。
     """
     try:
@@ -237,6 +238,9 @@ def place_order(
                 "stop_loss": cond.get("stop_loss"),
                 "take_profit": cond.get("take_profit"),
                 "max_hold_days": cond.get("max_hold_days"),
+                "trailing_drawdown": cond.get("trailing_drawdown"),
+                # 移动止盈（§六）：激活前为 None；激活后记录历史峰值最高价
+                "peak_high": None,
                 "buy_date": date,
                 "hold_days": 1,  # 买入日=第 1 天；后续结算日由 check_conditional_orders 递增
                 "hold_check_date": date,
@@ -255,7 +259,8 @@ def place_order(
                 pos["frozen_qty"] = pos.get("frozen_qty", 0) + qty
                 pos["avg_cost"] = round((old_cost + amount) / pos["qty"], 6)
                 # 条件单字段以本次买入计划为准（追加/覆盖绑定）
-                for k in ("stop_loss", "take_profit", "max_hold_days"):
+                for k in ("stop_loss", "take_profit", "max_hold_days",
+                          "trailing_drawdown", "peak_high"):
                     pos[k] = cond_fields.get(k)
             trade = {
                 "date": date, "code": code, "name": positions[code]["name"],
@@ -321,8 +326,10 @@ DEFAULT_MAX_HOLD_DAYS = 13
 
 
 def apply_conditional_defaults(conditional: Optional[dict], buy_price: float) -> dict:
-    """买入计划三字段缺省（requirements-trading-v1 §三.1）：None 字段按
-    买入价×0.95 / 买入价×1.10 / 13 补齐。返回 {stop_loss, take_profit, max_hold_days}。"""
+    """买入计划条件单字段缺省（requirements-trading-v1 §三.1/§六）：None 字段按
+    买入价×0.95 / 买入价×1.10 / 13 补齐；trailing_drawdown 不补默认（None=走固定止盈，
+    take_profit 仍是移动止盈的激活阈值）。返回 {stop_loss, take_profit, max_hold_days,
+    trailing_drawdown}。"""
     c = conditional or {}
     return {
         "stop_loss": float(c.get("stop_loss")) if c.get("stop_loss") is not None
@@ -331,6 +338,8 @@ def apply_conditional_defaults(conditional: Optional[dict], buy_price: float) ->
         else round(buy_price * DEFAULT_TAKE_PROFIT_RATE, 6),
         "max_hold_days": int(c.get("max_hold_days")) if c.get("max_hold_days") is not None
         else DEFAULT_MAX_HOLD_DAYS,
+        "trailing_drawdown": float(c["trailing_drawdown"])
+        if c.get("trailing_drawdown") is not None else None,
     }
 
 
@@ -393,6 +402,50 @@ def _conditional_sell_record(acct: dict, pos: dict, code: str, price: float,
     return trade
 
 
+def _trailing_stop(pos: dict, avg_cost: float) -> float:
+    """移动止盈线（requirements-trading-v1 §六）：stop = peak_high − trailing_drawdown × avg_cost。
+    peak_high 未激活为 None → 退化为正无穷（不触发）；trailing_drawdown 缺失 → 无移动止盈。"""
+    tdd = pos.get("trailing_drawdown")
+    peak = pos.get("peak_high")
+    if tdd is None or peak is None:
+        return float("inf")
+    return float(peak) - float(tdd) * float(avg_cost)
+
+
+def _take_profit_trigger(pos: dict, take_profit: float, quote: dict,
+                         avg_cost: float) -> bool:
+    """③ 止盈分支触发判定（requirements-trading-v1 §二.3/§六）。
+
+    - 固定止盈（pos.trailing_drawdown 为 None）：day.high >= take_profit → 触发（既有语义）。
+    - 移动止盈（pos.trailing_drawdown 提供）：
+      * 激活：hold 期内某日 high >= take_profit（=买入价×1.10）→ peak_high = 当日 high；
+      * 峰值跟踪：激活后每结算日 peak_high = max(peak_high, day.high)（peak_high 已存）；
+      * 移动止盈线 stop = peak_high − trailing_drawdown×avg_cost；
+      * 触发卖出：day.low < stop（激活后每一天都按 stop 检查，即便当日 high < take_profit）。
+      激活与回落可同日发生（high 先达阈值、low 又跌穿 stop）。
+    本函数副作用：按 §六 更新 pos["peak_high"]（激活/跟踪），不在此落卖单；
+    返回 True 表示当日应止盈卖出（成交价由调用方按固定/移动口径计算）。"""
+    tdd = pos.get("trailing_drawdown")
+    if tdd is None:
+        # 固定止盈（既有语义）
+        return float(quote["high"]) >= float(take_profit)
+    # 移动止盈
+    high = float(quote["high"])
+    low = float(quote["low"])
+    if not (0 < float(tdd) < 1):
+        return False  # 非法 drawdown → 不进入移动止盈（防御）
+    current_peak = pos.get("peak_high")
+    if current_peak is None:
+        if high < float(take_profit):
+            return False  # 未激活（涨幅未达 +10%），不跟踪、不触发
+        pos["peak_high"] = high  # 当日激活：峰值= 当日最高
+    else:
+        # 峰值跟踪：激活后每天更新峰值（低于既有峰值不抬升）
+        pos["peak_high"] = max(float(current_peak), high)
+    stop = _trailing_stop(pos, avg_cost)
+    return low < stop
+
+
 def check_conditional_orders(acct: dict, day: dict, quotes: dict) -> list[dict]:
     """每日条件单机械卖出（requirements-trading-v1 §二.5，B 层引擎核心）：
 
@@ -402,8 +455,9 @@ def check_conditional_orders(acct: dict, day: dict, quotes: dict) -> list[dict]:
     - ① 一字跌停（开板前无法成交）→ 不卖，顺延到下个交易日；
     - ② 止损：day.low < stop_loss → 卖，成交价 = min(open, stop_loss)
       （open 缺失 → stop_loss）；跳空低开打穿按开盘价成交；
-    - ③ 止盈：day.high >= take_profit → 卖，成交价 = max(open, take_profit)
-      （open 缺失 → take_profit）；跳空高开按开盘价成交；
+    - ③ 止盈：固定（day.high >= take_profit → 卖，成交价 = max(open, take_profit)，
+      open 缺失 → take_profit；跳空高开按开盘价）或 移动止盈（§六，见 _take_profit_trigger：
+      激活后按峰值 − 回落×成本 的移动止盈线，触发成交价 = min(open, stop)）；
     - ④ 超时：持有天数（买入日=第 1 天，沿结算日序列累计）>= max_hold_days
       且当日未止损止盈 → 收盘价卖出。
 
@@ -428,6 +482,7 @@ def check_conditional_orders(acct: dict, day: dict, quotes: dict) -> list[dict]:
             qty = int(pos_cur.get("qty") or 0)
             if qty <= 0:
                 continue
+            avg_cost = float(pos_cur.get("avg_cost") or 0.0)
             stop_loss = pos_cur.get("stop_loss")
             take_profit = pos_cur.get("take_profit")
             max_hold_days = int(pos_cur.get("max_hold_days") or 0)
@@ -454,11 +509,22 @@ def check_conditional_orders(acct: dict, day: dict, quotes: dict) -> list[dict]:
                 price = min(open_, float(stop_loss)) if open_ is not None else float(stop_loss)
                 trades.append(_conditional_sell_record(
                     acct, acct["positions"][code], code, price, qty, day, reason="stop_loss"))
-            # ③ 止盈：盘中最高 >= 止盈价（未止损时）
-            elif float(quote["high"]) >= float(take_profit):
-                price = max(open_, float(take_profit)) if open_ is not None else float(take_profit)
-                trades.append(_conditional_sell_record(
-                    acct, acct["positions"][code], code, price, qty, day, reason="take_profit"))
+            # ③ 止盈（未止损时）：固定止盈 或 移动止盈（requirements-trading-v1 §六）
+            elif _take_profit_trigger(pos_cur, float(take_profit), quote, avg_cost):
+                tdd = pos_cur.get("trailing_drawdown")
+                if tdd is not None:
+                    # 移动止盈：成交价 = min(open, stop)；open 缺失 → stop；跳空低开按开盘价
+                    stop = _trailing_stop(pos_cur, avg_cost)
+                    price = min(open_, stop) if open_ is not None else stop
+                    trades.append(_conditional_sell_record(
+                        acct, acct["positions"][code], code, price, qty, day,
+                        reason="trailing_take_profit"))
+                else:
+                    # 固定止盈（既有语义）
+                    price = max(open_, float(take_profit)) if open_ is not None else float(take_profit)
+                    trades.append(_conditional_sell_record(
+                        acct, acct["positions"][code], code, price, qty, day,
+                        reason="take_profit"))
             # ④ 超时：持有天数 >= max_hold_days → 收盘价卖出
             elif max_hold_days <= hold_days:
                 price = float(quote["close"])

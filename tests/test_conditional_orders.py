@@ -86,17 +86,21 @@ def test_buy_attaches_conditional_fields():
 
 
 def test_conditional_defaults_applied_in_engine():
-    """None 字段按买入价×0.95 / ×1.10 / 13 补齐（apply_conditional_defaults）。"""
+    """None 字段按买入价×0.95 / ×1.10 / 13 补齐（apply_conditional_defaults）；
+    trailing_drawdown 不补默认（保持 None → 固定止盈）。"""
     d = engine.apply_conditional_defaults({"stop_loss": None, "take_profit": None,
                                            "max_hold_days": None}, 10.00)
-    assert d == {"stop_loss": pytest.approx(9.50), "take_profit": pytest.approx(11.00),
-                 "max_hold_days": 13}
+    assert d["stop_loss"] == pytest.approx(9.50)
+    assert d["take_profit"] == pytest.approx(11.00)
+    assert d["max_hold_days"] == 13
+    assert d["trailing_drawdown"] is None
     # 部分显式：显式字段保留，缺失字段走默认
     d2 = engine.apply_conditional_defaults({"stop_loss": 9.0, "take_profit": None,
                                             "max_hold_days": None}, 10.00)
     assert d2["stop_loss"] == pytest.approx(9.0)
     assert d2["take_profit"] == pytest.approx(11.0)
     assert d2["max_hold_days"] == 13
+    assert d2["trailing_drawdown"] is None
 
 
 def test_buy_without_conditional_no_mecanical_sell():
@@ -272,6 +276,158 @@ def test_open_missing_take_profit_uses_tp_price():
 
 
 # ---------------------------------------------------------------------------
+# ⑧b 移动止盈（trailing take-profit，requirements-trading-v1 §六）
+# ---------------------------------------------------------------------------
+# 基准：买入价 10.00（avg_cost≈10），take_profit=11.00（激活阈值），trailing_drawdown=0.05
+# → 激活/跟踪用 stop = peak_high − 0.05×10 = peak_high − 0.5。
+
+def _trail_acct(code="600519", *, target=10.00, tdd=0.05,
+                stop_loss=5.00, max_hold_days=13, qty=2900):
+    """建仓（启用移动止盈）。"""
+    return _new_acct(code=code, target=target, qty=qty, conditional={
+        "stop_loss": stop_loss, "take_profit": 11.00,
+        "max_hold_days": max_hold_days, "trailing_drawdown": tdd,
+    })
+
+
+def test_buy_attaches_trailing_and_peak_high():
+    acct = _trail_acct()
+    pos = acct["positions"]["600519"]
+    assert pos["trailing_drawdown"] == pytest.approx(0.05)
+    assert pos["peak_high"] is None, "买入时 peak_high 初始化为 None"
+
+
+def test_trailing_not_activated_does_not_sell():
+    """未达激活阈值（high < 11）→ 不卖、峰值未激活（peak_high 保持 None）。"""
+    acct = _trail_acct()
+    day = {"date": "2026-08-04", "pre_close": 10.00, "open": 10.40,
+           "high": 10.90, "low": 10.20, "close": 10.60}
+    trades = engine.check_conditional_orders(acct, day, {"600519": day})
+    assert trades == []
+    assert "600519" in acct["positions"]
+    assert acct["positions"]["600519"].get("peak_high") is None
+
+
+def test_trailing_activated_not_enough_drawdown_no_sell():
+    """激活但未回落 5pp → 不卖；峰值跟踪正常。"""
+    acct = _trail_acct()
+    # Day1 激活：high 11.70 → peak 11.70，stop 11.20；low 11.30 ≥ stop → 不卖
+    day1 = {"date": "2026-08-04", "pre_close": 10.00, "open": 11.20,
+            "high": 11.70, "low": 11.30, "close": 11.50}
+    trades = engine.check_conditional_orders(acct, day1, {"600519": day1})
+    assert trades == []
+    pos = acct["positions"]["600519"]
+    assert pos["peak_high"] == pytest.approx(11.70)
+    # Day2：high 11.60（peak 仍 11.70），low 11.35 ≥ stop 11.20 → 未回落 5pp → 不卖
+    day2 = {"date": "2026-08-05", "pre_close": 11.50, "open": 11.50,
+            "high": 11.60, "low": 11.35, "close": 11.45}
+    trades = engine.check_conditional_orders(acct, day2, {"600519": day2})
+    assert trades == []
+    assert "600519" in acct["positions"]
+    assert acct["positions"]["600519"]["peak_high"] == pytest.approx(11.70)
+
+
+def test_trailing_peak_tracking_updates_to_new_high():
+    """激活后峰值随新高抬升：peak 11.50 → 11.70。"""
+    acct = _trail_acct()
+    day1 = {"date": "2026-08-04", "pre_close": 10.00, "open": 10.50,
+            "high": 11.50, "low": 11.10, "close": 11.30}
+    engine.check_conditional_orders(acct, day1, {"600519": day1})
+    assert acct["positions"]["600519"]["peak_high"] == pytest.approx(11.50)
+    day2 = {"date": "2026-08-05", "pre_close": 11.30, "open": 11.40,
+            "high": 11.70, "low": 11.25, "close": 11.40}
+    trades = engine.check_conditional_orders(acct, day2, {"600519": day2})
+    assert trades == [], "low 11.25 ≥ 新 stop 11.20 → 未触发"
+    assert acct["positions"]["600519"]["peak_high"] == pytest.approx(11.70)
+
+
+def test_trailing_drawdown_triggers_sell_at_stop():
+    """回落触发：成交价 = min(open, stop)（open ≥ stop → 按 stop，跳空低开按开盘价）。"""
+    acct = _trail_acct()
+    # Day1 激活：peak 11.70，stop 11.20，不卖
+    day1 = {"date": "2026-08-04", "pre_close": 10.00, "open": 11.20,
+            "high": 11.70, "low": 11.30, "close": 11.50}
+    engine.check_conditional_orders(acct, day1, {"600519": day1})
+    assert "600519" in acct["positions"]
+    # Day2 触发（非跳空）：open 11.30 ≥ stop 11.20，low 11.10 < 11.20 → 成交价 = stop 11.20
+    day2 = {"date": "2026-08-05", "pre_close": 11.50, "open": 11.30,
+            "high": 11.40, "low": 11.10, "close": 11.18}
+    trades = engine.check_conditional_orders(acct, day2, {"600519": day2})
+    assert len(trades) == 1
+    assert trades[0]["condition"] == "trailing_take_profit"
+    assert trades[0]["price"] == pytest.approx(11.20)
+    assert "600519" not in acct["positions"]
+
+
+def test_trailing_gap_open_sells_at_open_price():
+    """跳空低开触发：open < stop → 成交价 = 开盘价。"""
+    acct = _trail_acct()
+    day1 = {"date": "2026-08-04", "pre_close": 10.00, "open": 11.20,
+            "high": 11.70, "low": 11.30, "close": 11.50}
+    engine.check_conditional_orders(acct, day1, {"600519": day1})
+    # Day2 跳空低开：open 10.80 < stop 11.20，low 10.75 → 成交价 = open 10.80
+    day2 = {"date": "2026-08-05", "pre_close": 11.50, "open": 10.80,
+            "high": 10.95, "low": 10.75, "close": 10.85}
+    trades = engine.check_conditional_orders(acct, day2, {"600519": day2})
+    assert len(trades) == 1
+    assert trades[0]["condition"] == "trailing_take_profit"
+    assert trades[0]["price"] == pytest.approx(10.80)
+
+
+def test_trailing_activate_and_trigger_same_day():
+    """同日激活 + 回落触发：high 触发激活、low 又跌穿 stop → 当日卖出。"""
+    acct = _trail_acct()
+    # high 11.80 激活（stop 11.30），low 11.00 < 11.30 → 同日触发；open 11.40 ≥ stop → 成交 stop 11.30
+    day = {"date": "2026-08-04", "pre_close": 10.00, "open": 11.40,
+           "high": 11.80, "low": 11.00, "close": 11.20}
+    trades = engine.check_conditional_orders(acct, day, {"600519": day})
+    assert len(trades) == 1
+    assert trades[0]["condition"] == "trailing_take_profit"
+    assert trades[0]["price"] == pytest.approx(11.30)
+    assert "600519" not in acct["positions"]
+
+
+def test_trailing_no_open_uses_stop_price():
+    """open 缺失 → 移动止盈成交价 = stop。"""
+    acct = _trail_acct()
+    day1 = {"date": "2026-08-04", "pre_close": 10.00, "open": 11.20,
+            "high": 11.70, "low": 11.30, "close": 11.50}
+    engine.check_conditional_orders(acct, day1, {"600519": day1})
+    day2 = {"date": "2026-08-05", "pre_close": 11.50,
+            "high": 11.30, "low": 11.10, "close": 11.15}
+    trades = engine.check_conditional_orders(acct, day2, {"600519": day2})
+    assert len(trades) == 1
+    assert trades[0]["condition"] == "trailing_take_profit"
+    assert trades[0]["price"] == pytest.approx(11.20)
+
+
+def test_trailing_absent_fixed_take_profit_unchanged():
+    """无 trailing_drawdown → 固定止盈行为不变（成交 max(open, tp)）。"""
+    acct = _new_acct(conditional={"stop_loss": 9.50, "take_profit": 11.00, "max_hold_days": 13})
+    assert acct["positions"]["600519"].get("trailing_drawdown") is None
+    assert acct["positions"]["600519"].get("peak_high") is None
+    day = {"date": "2026-08-04", "pre_close": 10.00, "open": 11.50,
+           "high": 11.60, "low": 10.90, "close": 11.40}
+    trades = engine.check_conditional_orders(acct, day, {"600519": day})
+    assert len(trades) == 1
+    assert trades[0]["condition"] == "take_profit"
+    assert trades[0]["price"] == pytest.approx(11.50)
+
+
+def test_apply_conditional_defaults_preserves_trailing():
+    d = engine.apply_conditional_defaults(
+        {"stop_loss": 9.50, "take_profit": 11.00, "max_hold_days": 13,
+         "trailing_drawdown": 0.05}, 10.00)
+    assert d["trailing_drawdown"] == pytest.approx(0.05)
+    assert d["take_profit"] == pytest.approx(11.00)
+    d2 = engine.apply_conditional_defaults(
+        {"stop_loss": None, "take_profit": None, "max_hold_days": None,
+         "trailing_drawdown": None}, 10.00)
+    assert d2["trailing_drawdown"] is None
+    assert d2["take_profit"] == pytest.approx(11.00)
+
+
+# ---------------------------------------------------------------------------
 # ⑨ 计划三字段校验 / 解析
 # ---------------------------------------------------------------------------
 
@@ -328,6 +484,63 @@ def test_plan_extractor_parses_conditional_fields(monkeypatch, data_dir):
     d2 = json.loads((data_dir / "reviews" / "2026-08-04" / "plan.json")
                     .read_text("utf-8"))["plans"][0]
     assert d2["stop_loss"] is None and d2["take_profit"] is None and d2["max_hold_days"] is None
+
+
+@pytest.mark.skipif(PYTESTMARK_SKIP, reason="plan/plan_extractor 未实现")
+def test_plan_validation_trailing_drawdown():
+    """trailing_drawdown 可选：0<x<1；None → JSON null；越界抛 ValueError。"""
+    ok = PlanRec.from_dict({
+        "rec_date": "2026-08-03", "skill_id": "alang", "code": "600519", "side": "buy",
+        "target_price": 10.00, "position_cheng": 3, "qty": None, "source": "tool",
+        "stop_loss": 9.50, "take_profit": 11.00, "max_hold_days": 13,
+        "trailing_drawdown": 0.05,
+    })
+    assert ok.trailing_drawdown == pytest.approx(0.05)
+    assert ok.to_dict()["trailing_drawdown"] == pytest.approx(0.05)
+    for bad in (0.0, 1.0, -0.1, 1.5, 5):
+        with pytest.raises(ValueError):
+            PlanRec.from_dict({
+                "rec_date": "2026-08-03", "skill_id": "alang", "code": "600519",
+                "side": "buy", "target_price": 10.00, "position_cheng": 3,
+                "source": "tool", "trailing_drawdown": bad,
+            })
+    r = PlanRec.from_dict({
+        "rec_date": "2026-08-03", "skill_id": "alang", "code": "600519", "side": "buy",
+        "target_price": 10.00, "position_cheng": 3, "source": "tool",
+    })
+    assert r.trailing_drawdown is None
+    assert r.to_dict()["trailing_drawdown"] is None
+
+
+@pytest.mark.skipif(PYTESTMARK_SKIP, reason="plan/plan_extractor 未实现")
+def test_plan_extractor_parses_trailing_drawdown(monkeypatch, data_dir):
+    """买入行解析 回落N% / 回落N个百分点 → trailing_drawdown=N/100；未写 → None。"""
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(data_dir))
+    from stock_review_crew.accounts import plan as plan_store
+    plan_store.reset("2026-08-03")
+    extract_plans(
+        "买入 600519：买入价10.00元，仓位3成，止损9.50元，止盈11.00元，回落5%，持有5天",
+        "2026-08-03", "alang", "阿郎", set())
+    plan_store.finalize("2026-08-03")
+    plans = json.loads((data_dir / "reviews" / "2026-08-03" / "plan.json")
+                       .read_text("utf-8"))["plans"]
+    assert len(plans) == 1
+    assert plans[0]["trailing_drawdown"] == pytest.approx(0.05)
+    # 回落N个百分点 写法
+    plan_store.reset("2026-08-04")
+    extract_plans("买入 002384：买入价10.00元，仓位2成，回落3个百分点",
+                  "2026-08-04", "alang", "阿郎", set())
+    plan_store.finalize("2026-08-04")
+    d2 = json.loads((data_dir / "reviews" / "2026-08-04" / "plan.json")
+                    .read_text("utf-8"))["plans"][0]
+    assert d2["trailing_drawdown"] == pytest.approx(0.03)
+    # 未写回落 → None（固定止盈）
+    plan_store.reset("2026-08-05")
+    extract_plans("买入 600000：买入价10.00元，仓位2成", "2026-08-05", "alang", "阿郎", set())
+    plan_store.finalize("2026-08-05")
+    d3 = json.loads((data_dir / "reviews" / "2026-08-05" / "plan.json")
+                    .read_text("utf-8"))["plans"][0]
+    assert d3["trailing_drawdown"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -424,3 +637,37 @@ def test_run_replay_conditional_timeout_after_13_days(monkeypatch, data_dir):
     assert len(cond) == 1, f"应恰好一次条件单超时卖出，实际 {len(cond)}"
     assert cond[0]["condition"] == "timeout"
     assert cond[0]["qty"] == 2900
+
+
+def test_settle_plans_trailing_take_profit(monkeypatch, data_dir):
+    """移动止盈经 settle_plans 全链路：plan 带 trailing_drawdown → 激活后峰值新高回落触发卖出。"""
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(data_dir))
+    # D0 买入计划：target 10.00，trailing_drawdown=0.05（take_profit 默认 11.00 激活阈值）
+    _write_plan(data_dir, "2026-08-03",
+                [_plan("2026-08-03", target=10.00, trailing_drawdown=0.05)])
+    _write_plan(data_dir, "2026-08-04", [])
+    _write_plan(data_dir, "2026-08-05", [])
+    # 撮合日（08-04）：单价触及买入
+    _write_quotes(data_dir, "2026-08-04",
+                  {"600519": _quote(close=10.10, pre_close=10.00, high=10.20, low=9.95, open_=10.05)})
+    # 激活日（08-05）：high 11.70（→peak 11.70, stop 11.20），low 11.30 未触发
+    _write_quotes(data_dir, "2026-08-05",
+                  {"600519": _quote(close=11.50, pre_close=10.00, high=11.70, low=11.30, open_=11.20)})
+    # 回落触发日（08-06）：high 11.40（peak 仍 11.70），low 11.10 < stop 11.20 → 卖
+    _write_quotes(data_dir, "2026-08-06",
+                  {"600519": _quote(close=11.18, pre_close=11.50, high=11.40, low=11.10, open_=11.30)})
+    assert replay.settle_plans("2026-08-03", "2026-08-04")["filled"] == 1
+    r2 = replay.settle_plans("2026-08-04", "2026-08-05")
+    assert "conditional_trades" not in r2 or not r2["conditional_trades"], "激活日未触发不卖"
+    # 撮合日也推进无计划日的状态，因此 08-05 结算会把 08-04 撮合的持仓跑条件单（激活日）
+    acc = json.loads((data_dir / "accounts" / "alang" / "account.json").read_text("utf-8"))
+    assert "600519" in acc["positions"], "激活日未回落 → 持仓未卖"
+    r3 = replay.settle_plans("2026-08-05", "2026-08-06")
+    assert any("600519" in n and "条件单卖出" in n for n in r3["conditional_trades"])
+    trades = json.loads((data_dir / "accounts" / "alang" / "trades.json").read_text("utf-8"))
+    cond = [t for t in trades if t.get("side") == "sell" and t.get("condition")]
+    assert len(cond) == 1
+    assert cond[0]["condition"] == "trailing_take_profit"
+    assert cond[0]["price"] == pytest.approx(11.20), "触发日 open 11.30 ≥ stop → 按 stop 成交"
+    acc2 = json.loads((data_dir / "accounts" / "alang" / "account.json").read_text("utf-8"))
+    assert acc2["positions"] == {}, "移动止盈触发后应清仓"

@@ -5,9 +5,11 @@
 - plan.json = {date, mode, generated_at, plans[]}；同日重跑整文件覆盖；
 - plans[].rec_date / skill_id / skill_name / code / name / side /
   target_price / position_cheng / qty / source；qty=None 序列化为 JSON null；
-- plans[].stop_loss / take_profit / max_hold_days（可选，requirements-trading-v1 §三）；
-  均可缺省，缺省在撮合入口按 买入价×0.95 / 买入价×1.10 / 13 计算；
-  提供则须 >0 且 止损 < 买入价 < 止盈；max_hold_days 为正整数；None 序列化为 JSON null；
+- plans[].stop_loss / take_profit / max_hold_days / trailing_drawdown（可选出条件字段，
+  requirements-trading-v1 §三/§六）；stop_loss/take_profit/max_hold_days 均可缺省，
+  缺省在撮合入口按 买入价×0.95 / 买入价×1.10 / 13 计算；trailing_drawdown 提供 → 移动
+  止盈（None → 固定止盈）；提供则须 >0 且 止损 < 买入价 < 止盈；max_hold_days 为正整数；
+  trailing_drawdown 须 0<x<1；None 序列化为 JSON null；
 - 去重键：(rec_date, skill_id, code, side, target_price)，target_price 容差 <0.01
   （2026-08-10 修复过重复提取，语义必须保留）；
 - source 枚举：tool / regex_qty / regex_cheng；skill_id 排除 host/review_assistant；
@@ -121,6 +123,9 @@ class PlanRec:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     max_hold_days: Optional[int] = None
+    # 移动止盈（requirements-trading-v1 §六，可选）：比率小数（0.05=5 个百分点）。
+    # 提供 → 触发移动止盈；None → 走固定止盈。
+    trailing_drawdown: Optional[float] = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "PlanRec":
@@ -141,6 +146,8 @@ class PlanRec:
             stop_loss=_as_optional_float(d.get("stop_loss"), "stop_loss"),
             take_profit=_as_optional_float(d.get("take_profit"), "take_profit"),
             max_hold_days=_as_optional_int(d.get("max_hold_days"), "max_hold_days"),
+            trailing_drawdown=_as_optional_float(
+                d.get("trailing_drawdown"), "trailing_drawdown"),
         )
         errors = validate_plan(rec)
         if errors:
@@ -176,6 +183,7 @@ class PlanRec:
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
             "max_hold_days": self.max_hold_days,
+            "trailing_drawdown": self.trailing_drawdown,
         }
 
     def same_as(self, other: "PlanRec") -> bool:
@@ -305,6 +313,16 @@ def validate_plan(rec: PlanRec) -> list[str]:
             if not isinstance(mh, int) or mh <= 0:
                 errors.append(
                     f"max_hold_days 必须为正整数，收到：{rec.max_hold_days!r}")
+        if rec.trailing_drawdown is not None:
+            try:
+                tdd = float(rec.trailing_drawdown)
+                if tdd != tdd or not (0 < tdd < 1):
+                    errors.append(
+                        f"trailing_drawdown 必须为 0-1 之间的小数（0.05=回落 5 个百分点），"
+                        f"收到：{rec.trailing_drawdown!r}")
+            except (TypeError, ValueError):
+                errors.append(
+                    f"trailing_drawdown 必须为 0-1 之间的小数，收到：{rec.trailing_drawdown!r}")
     return errors
 
 

@@ -89,3 +89,45 @@
 6. 全量 pytest（系统 Python `C:\Python313\python.exe -m pytest tests/ -p no:cacheprovider`）
    与既有账户回放校验通过；新增专项测试覆盖上述 1~5（含跳空、一字跌停、13 日超时）。
 7. 提示词改动不引入未来函数表述，5 位分析师 skill.json 均含止盈止损纪律。
+
+---
+
+## 六、移动止盈 v1.1（爱在冰川）
+
+> 状态：规格已与用户确认（2026-08 后补充），为 v1 个别分析师可用的增量止盈模式。
+> 语义/字段实现见 `src/stock_review_crew/accounts/{engine,plan,plan_extractor}.py` 与专项测试。
+
+### 1. 语义（唯一口径）
+
+移动止盈在**固定止盈（§二.3）之外**并行可选，二者互斥：买入计划带
+`trailing_drawdown` → 该持仓走移动止盈；否则走现有固定止盈。take_profit 仍是移动止盈的
+**激活阈值**（= 买入价 × 1.10，不因启用移动止盈而改）。
+
+| 要素 | 定义 |
+|---|---|
+| **激活** | 持有期内某日盘中最高价 `high >= take_profit`（涨幅达 +10%） |
+| **峰值跟踪** | 激活后 `peak_high = max(peak_high, 当日 high)`；买入时初始化 `peak_high = None` |
+| **移动止盈线** | 激活后每个结算日 `stop = peak_high − trailing_drawdown × avg_cost` |
+| **触发卖出** | `day.low < stop` → 卖，成交价 `= min(open, stop)`；open 缺失 → stop；跳空低开按开盘价 |
+
+- 激活后每一天都按 `stop` 检查（即便当日 `high < take_profit` 回落，也同样检查/跟踪峰值）。
+- 激活与回落可**同日发生**（high 先达阈值、low 又跌穿 stop）→ 当日触发卖出。
+- 同日触发优先级沿用 §二.5：一字跌停 → 止损 → 止盈（含移动）→ 超时。
+- 移动止盈与固定止盈互斥；启用移动止盈的持仓不复用 `max(open, take_profit)` 固定口径。
+
+例（买入价 100、take_profit=110、trailing_drawdown=0.05）：
+- 峰值 115（+15%）→ stop = 115 − 5 = 110（+10%）；
+- 峰值 117（+17%）→ stop = 117 − 5 = 112（+12%）。
+
+### 2. 数据字段
+
+- `PlanRec.trailing_drawdown: Optional[float] = None`：比率小数，0.05 = 5 个百分点。
+  - 提供则须 `0 < x < 1`（校验失败 → 抛中文 ValueError）；
+  - `to_dict` / `from_dict` / 序列化同步；`None` → JSON `null`。
+- `plan_extractor`：买入行新增解析 `回落N%`（或 `回落N个百分点`）→ `trailing_drawdown = N/100`；
+  解析不到 → `None`；卖出行不新增字段。
+- `engine.place_order`：买入成交把 `trailing_drawdown` 挂到持仓，并初始化 `peak_high = None`；
+- `engine.check_conditional_orders` ③止盈分支：计划带 `trailing_drawdown` → 移动止盈，
+  否则固定止盈（既有行为不变）；
+- `engine.apply_conditional_defaults` 不改默认（take_profit 仍为激活阈值）；
+  `trailing_drawdown` 透传（None 默认）。

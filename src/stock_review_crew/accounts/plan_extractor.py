@@ -7,8 +7,9 @@
 - side 判定：有「买入/卖出」前缀用前缀；无前缀用价格关键字（买入价→buy、卖出价→sell）；
 - qty/cheng 互斥：匹配「N股」→ qty 语义（source=regex_qty），
   匹配「仓位N成」→ 成数语义（source=regex_cheng）；
-- 买入可选条件单字段（requirements-trading-v1 §三）：止损XX.XX元 / 止盈XX.XX元 /
-  持有N天；解析不到保持 None（撮合入口按引擎默认计算）；
+- 买入可选条件单字段（requirements-trading-v1 §三/§六）：止损XX.XX元 / 止盈XX.XX元 /
+  持有N天 / 回落N%（或 回落N个百分点，→ trailing_drawdown = N/100）；
+  解析不到保持 None（撮合入口按引擎默认计算）；
 - qty 关键字（买入N股/卖出N股）出现时须与 side 一致（旧 qty 式要求，防止矛盾输入入库）；
 - 卖出且 code 不在 held_codes → 跳过并记录 {"type":"sell_skipped_no_position",...}；
 - 通过 accounts.plan.add 写入 plan registry（复用校验/去重/归一），单笔失败不阻塞；
@@ -32,6 +33,7 @@ _PLAN_RE = re.compile(
     r"[，,，\s]*(?:(?:(?P<qty_kw>买入|卖出)\s*)?(?P<qty>\d+)\s*股|仓位\s*(?P<cheng>\d+)\s*成)"
     r"(?:\s*[，,，\s]*止损\s*(?P<stop_loss>\d+(?:\.\d+)?)\s*元)?"
     r"(?:\s*[，,，\s]*止盈\s*(?P<take_profit>\d+(?:\.\d+)?)\s*元)?"
+    r"(?:\s*[，,，\s]*回落\s*(?P<trailing_drawdown>\d+(?:\.\d+)?)\s*(?:%|个百分点))?"
     r"(?:\s*[，,，\s]*持有\s*(?P<max_hold_days>\d+)\s*天)?"
 )
 
@@ -53,17 +55,21 @@ def _side_for(match: re.Match) -> str:
 
 
 def _conditional_fields(match: re.Match, side: str) -> dict:
-    """买入计划可选条件单字段（止损/止盈/持有天数），解析不到保持 None。
+    """买入计划可选条件单字段（止损/止盈/持有天数/移动止盈回落），解析不到保持 None。
     非买入(side == sell)计划一律 None（卖出计划不新增字段）。"""
     if side != "buy":
-        return {"stop_loss": None, "take_profit": None, "max_hold_days": None}
+        return {"stop_loss": None, "take_profit": None, "max_hold_days": None,
+                "trailing_drawdown": None}
     sl = match.group("stop_loss")
     tp = match.group("take_profit")
     mh = match.group("max_hold_days")
+    tdd = match.group("trailing_drawdown")
     return {
         "stop_loss": float(sl) if sl is not None else None,
         "take_profit": float(tp) if tp is not None else None,
         "max_hold_days": int(mh) if mh is not None else None,
+        # 回落 N% / N 个百分点 → 比率小数 N/100（0.05=5 个百分点）
+        "trailing_drawdown": (float(tdd) / 100.0) if tdd is not None else None,
     }
 
 

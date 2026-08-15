@@ -606,7 +606,7 @@ def run_replay(start: Optional[str] = None, end: Optional[str] = None,
             except (TypeError, ValueError):
                 qty = 0
             acct = accounts[str(plan.get("skill_id") or "unknown")]
-            # 买入计划条件单三字段缺省 → 引擎默认（§三）
+            # 买入计划条件单三字段缺省 → 引擎默认（§三）；trailing_drawdown 透传（§六）
             conditional = None
             if side == "buy" and target > 0:
                 conditional = acct_engine.apply_conditional_defaults(
@@ -614,6 +614,7 @@ def run_replay(start: Optional[str] = None, end: Optional[str] = None,
                         "stop_loss": plan.get("stop_loss"),
                         "take_profit": plan.get("take_profit"),
                         "max_hold_days": plan.get("max_hold_days"),
+                        "trailing_drawdown": plan.get("trailing_drawdown"),
                     },
                     target,
                 )
@@ -836,7 +837,8 @@ def settle_plans(rec_date: str, settle_date: str,
         except (TypeError, ValueError):
             qty = 0
         acct = accounts[str(p.get("skill_id") or "unknown")]
-        # 买入计划条件单三字段：缺省按引擎默认（买入价×0.95 / ×1.10 / 13）补齐（§三）
+        # 买入计划条件单三字段：缺省按引擎默认（买入价×0.95 / ×1.10 / 13）补齐（§三）；
+        # trailing_drawdown 透传（§六）
         conditional = None
         if side == "buy" and target > 0:
             conditional = acct_engine.apply_conditional_defaults(
@@ -844,6 +846,7 @@ def settle_plans(rec_date: str, settle_date: str,
                     "stop_loss": p.get("stop_loss"),
                     "take_profit": p.get("take_profit"),
                     "max_hold_days": p.get("max_hold_days"),
+                    "trailing_drawdown": p.get("trailing_drawdown"),
                 },
                 target,
             )
