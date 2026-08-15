@@ -37,6 +37,9 @@ __all__ = [
     "delete_review",
     "context",
     "has_review",
+    "save_market_data",
+    "load_market_data",
+    "has_market_data",
 ]
 
 # 6 种复盘模式中文标签（requirements §二，与提示词/前端保持一致）
@@ -452,3 +455,62 @@ def context(date: Any, mode: Optional[str] = None) -> dict:
                     break
 
     return {"yesterday": yesterday, "earlier_today": earlier_today}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 完整行情快照落盘（离线回放预热，2026-08-15）
+# ═══════════════════════════════════════════════════════════════
+#
+# market_data.json 保存「喂给 LLM 的完整取数结果」，供重跑历史复盘时的离线回放：
+# 复用已落盘的行情快照、避免再次实时调东财/腾讯/akshare（绕开东财 502 抖动、
+# 保证 A/B 回测输入确定性一致）。与 meta.json/report.json/snapshot.json/plan.json
+# 同目录（data/reviews/{date}/），路径遵循 STOCK_REVIEW_DATA_DIR 测试隔离。
+#
+# payload 约定（至少）：
+#   date / mode / mode_label / blocks（fetch_mode_data 的完整 blocks）/
+#   market_data（渲染后的 Markdown 文本） / market_weather / emotion_cycle /
+#   raw_news / degraded_notes（下游使用的最终降级标注）/ source / saved_at
+#
+# 读取端健壮：目录缺失 / 模式不符 / JSON 损坏一律返回 {}（绝不抛异常）。
+
+_MARKET_DATA_FILENAME = "market_data.json"
+
+
+def market_data_path(date: Any) -> Path:
+    """{date}/market_data.json 的路径（不校验存在性）。"""
+    if not _valid_date(date):
+        return reviews_root() / str(date or "") / _MARKET_DATA_FILENAME
+    return reviews_root() / str(date).strip() / _MARKET_DATA_FILENAME
+
+
+def save_market_data(date: Any, payload: Any) -> str:
+    """保存完整行情快照到 {date}/market_data.json，返回 date（YYYY-MM-DD）。
+
+    合法日期才写盘；非法日期抛中文 ValueError（与 save_review 一致）。
+    payload 须为 dict；非 dict 抛中文 TypeError。覆盖写不归档（行情快照可安全重建）。
+    """
+    date = str(date or "").strip()
+    if not _valid_date(date):
+        raise ValueError(f"日期格式必须为 YYYY-MM-DD，收到：{date!r}")
+    if not isinstance(payload, dict):
+        raise TypeError("market_data payload 必须为 dict")
+    root = _ensure_root()
+    date_dir = root / date
+    try:
+        date_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:  # noqa: BLE001 - 建目录失败显式抛（写接口需要失败可见）
+        raise OSError(f"创建复盘目录失败：{date_dir}（{exc}）") from exc
+    _write_json(date_dir / _MARKET_DATA_FILENAME, payload)
+    return date
+
+
+def load_market_data(date: Any) -> dict:
+    """读取 {date}/market_data.json；缺失 / JSON 损坏 / 非 dict 一律返回 {}。"""
+    path = market_data_path(date)
+    data = _read_json(path)
+    return data if isinstance(data, dict) else {}
+
+
+def has_market_data(date: Any) -> bool:
+    """该日期是否已有完整行情快照（market_data.json 存在且为合法 dict）。"""
+    return bool(load_market_data(date))

@@ -42,7 +42,10 @@ def _fake_data():
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     """离线约束：LLM 用确定性 mock（2026-08-10 用户口径：LLM 不可用时复盘直接终止，
-    因此测流水线逻辑的用例必须让 LLM 可用）；数据链路仍全 mock。"""
+    因此测流水线逻辑的用例必须让 LLM 可用）；数据链路仍全 mock。
+    2026-08-15：显式 REVIEW_FORCE_FETCH=1 强制实时取数——本文件测试流水线逻辑，维持
+    「每次调用都实时取数」的原始语义（离线回放路径由 test_offline_replay.py 专项覆盖）。"""
+    monkeypatch.setenv("REVIEW_FORCE_FETCH", "1")
     monkeypatch.setattr(graph, "_llm_ready", lambda: True)
     llm = _FakeLLM(_llm_factory)
     strict = _FakeLLM(_llm_factory)

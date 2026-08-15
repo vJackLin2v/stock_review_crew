@@ -454,13 +454,31 @@ def _render_market_markdown(data, mode, notes):
 
 
 def fetch_data_node(state):
-    """Node1：按 mode 分发取数（I1 纯函数优先，防御性降级，绝不阻塞）。"""
+    """Node1：按 mode 分发取数（I1 纯函数优先，防御性降级，绝不阻塞）。
+
+    2026-08-15：离线回放——若 data/reviews/{date}/market_data.json 已存在且模式匹配
+    （且未显式要求强制实时取数），则直接复用该快照，跳过一切实时取数，用其复现
+    market_data / market_weather / emotion_cycle，并把 source 标为「离线回放」、
+    降级说明加入「离线回放：复用已缓存行情快照，未实时取数」。下游返回契约与
+    实时取数完全一致（字段同构）。强制实时取数开关：env REVIEW_FORCE_FETCH=1/true/on/yes
+    或 state["force_fetch"] 真值（任一满足即强制）。
+    """
     mode = state.get("mode") or DEFAULT_MODE
     date = state.get("date") or ""
     _reset_progress()
     _emit("fetch", 3, "正在拉取行情数据…")
 
     notes = []
+
+    if not _force_fetch(state):
+        from .storage.reviews import load_market_data
+
+        cached = load_market_data(date)
+        if cached and cached.get("mode") == mode and isinstance(cached.get("blocks"), dict):
+            replayed = _replay_market_data(cached, mode, date, state)
+            _emit("fetch", 8, "行情数据获取完成（离线回放）")
+            return replayed
+
     fetcher = _load_pure_fetcher()
     data = None
     source = "missing"
@@ -541,6 +559,28 @@ def fetch_data_node(state):
     except Exception:  # noqa: BLE001 - 情绪周期定位失败不阻断复盘
         emotion_cycle = "数据不足"
 
+    # 2026-08-15：完整行情快照落盘（离线回放预热）——把喂给 LLM 的完整取数结果
+    # （blocks + 渲染文本 + 天气/情绪结论 + 降级标注）落盘到 market_data.json，
+    # 供重跑历史复盘离线复用（确定性 + 绕开东财 502）。落盘失败不阻塞复盘。
+    try:
+        from .storage.reviews import save_market_data
+
+        save_market_data(date, {
+            "date": date,
+            "mode": mode,
+            "mode_label": mode_label,
+            "blocks": data if isinstance(data, dict) else {},
+            "market_data": market_md,
+            "market_weather": weather_text,
+            "emotion_cycle": emotion_cycle,
+            "raw_news": raw_news,
+            "degraded_notes": list(notes),
+            "source": source,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        })
+    except Exception:  # noqa: BLE001 - 落盘失败不阻断复盘
+        pass
+
     _emit("fetch", 8, "行情数据获取完成")
     return {
         "market_data": market_md,
@@ -549,6 +589,80 @@ def fetch_data_node(state):
         "raw_news": raw_news,
         "snapshot": snapshot,
         "degraded": bool(notes) or bool(state.get("degraded")),
+        "degraded_notes": notes,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 离线回放：复用已落盘的完整行情快照（2026-08-15）
+# ═══════════════════════════════════════════════════════════════
+
+_OFFLINE_NOTE = "离线回放：复用已缓存行情快照，未实时取数"
+
+
+def _force_fetch(state) -> bool:
+    """是否强制实时取数：env REVIEW_FORCE_FETCH=1/true/on/yes 或 state force_fetch 真值。"""
+    try:
+        env = os.environ.get("REVIEW_FORCE_FETCH", "").strip().lower()
+        if env in ("1", "true", "on", "yes"):
+            return True
+    except Exception:  # noqa: BLE001 - 读取 env 失败按不强制处理
+        pass
+    try:
+        if state.get("force_fetch"):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _replay_market_data(cached: dict, mode: str, date: str, state: dict) -> dict:
+    """用已落盘快照复现 fetch_data_node 的返回契约（字段同构、确定性一致）。
+
+    - market_data / market_weather / emotion_cycle / raw_news 直接复用缓存当时的值；
+    - snapshot 用缓存 blocks + 最终降级标注重建（source 标「离线回放」）；
+    - degraded_notes = 缓存当时标注 ∪ 「离线回放」说明（保证用户可见来源）。
+    """
+    blocks = cached.get("blocks")
+    if not isinstance(blocks, dict):
+        blocks = {}
+
+    # 与实时取数路径一致：资讯开关关闭时剥离资讯块（快照不含资讯）
+    if not _news_enabled():
+        blocks = dict(blocks)
+        for _k in ("raw_news", "news", "headlines", "caixin", "cctv"):
+            blocks.pop(_k, None)
+
+    notes = [str(r) for r in (cached.get("degraded_notes") or []) if r]
+    offline_note = _OFFLINE_NOTE
+    if not any(offline_note in str(n) for n in notes):
+        notes.append(offline_note)
+
+    source = "离线回放"
+    snapshot = _normalize_snapshot(blocks, mode, date, notes, source)
+    mode_label = cached.get("mode_label")
+    if mode_label:
+        snapshot["mode_label"] = mode_label
+
+    market_md = cached.get("market_data")
+    if not isinstance(market_md, str) or not market_md:
+        # 兼容仅存 blocks 的预热 payload：离线渲染（blocks + 降级标注确定，重渲染一致）
+        try:
+            market_md = _render_market_markdown(blocks, mode, notes) or "（无数据）"
+        except Exception:  # noqa: BLE001 - 渲染失败兜底不抛
+            market_md = "（无数据）"
+    market_md = str(market_md)
+    weather_text = str(cached.get("market_weather") or "无数据")
+    emotion_cycle = str(cached.get("emotion_cycle") or "数据不足")
+    raw_news = str(cached.get("raw_news") or "")
+
+    return {
+        "market_data": market_md,
+        "market_weather": weather_text,
+        "emotion_cycle": emotion_cycle,
+        "raw_news": raw_news,
+        "snapshot": snapshot,
+        "degraded": True,  # 含「离线回放」降级说明 → 与实时 path 的 bool(notes) 语义一致
         "degraded_notes": notes,
     }
 
