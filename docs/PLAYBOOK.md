@@ -792,3 +792,48 @@
   重试跨越抖动；7-01~8-14 共 33 个交易日逐日交错撮合跑通，总成交 135 / 拒绝 97 /
   行情缺失 0。教训：**批跑绝不能「单日失败静默跳过」**；外部服务抖动要 fail-fast +
   拉长重试间隔，而不是靠事后补跑。
+
+### [2026-08-15] 给 place_order 加可选 keyword 参数会破坏 monkeypatch 假引擎（测试签名适配）
+- 现象：为条件单给 `engine.place_order` 加 `*, conditional=None` 后，`run_replay`/`settle_plans`
+  对买入计划传 `conditional=`，凡 monkeypatch 替换 `place_order` 的测试（test_account_replay.py
+  的 `_fake_engine`、test_r12_backtest.py 的 `_fake_place_order`、`test_run_replay_*_rejections`）
+  全部 `TypeError: got an unexpected keyword argument 'conditional'`。
+- 原因：这些假引擎签名 `fake(account, code, name, side, target_price, position, day)` 未收新
+  kwarg，而撮合入口真实传参带 conditional。
+- 解决：三个测试文件的所有假 `place_order` 签名统一改 `(..., day, **kwargs)`，内部兜底调用
+  `orig(..., **kwargs)` 转发。
+- 备注/复现：**给引擎/API 加可选参数前，先 grep 测试里 monkeypatch 该函数签名的地方**；
+  假实现接收 `**kwargs` 是常态防破手段。全量 762 passed / 53 skipped（R12 验收 skip 为既有态）。
+
+### [2026-08-15] 条件单持有天数要用持仓内计数器，勿用自然日差
+- 现象/设计：需求「超时持有到第 13 个交易日收盘」——若用
+  `(day_date - buy_date).days`（自然日）跨周末/节假日会**多计天数**，导致提前超时清仓。
+- 解决：持仓挂 `hold_days`（买入日=1）+ `hold_check_date`，`check_conditional_orders` 在
+  **每个结算日**只对 `hold_check_date != day` 的持仓 +1（幂等），按结算日序列累计到第 13 天。
+- 备注/复现：`settle_plans`（增量加载落盘）与 `run_replay`（全量内存）都能正确持久该计数，
+  保证两种回放确定性一致。
+
+### [2026-08-15] 历史复盘离线回放 + 数据预热（完整行情快照落盘）
+- 背景：复盘落盘时 snapshot.json 只保留前端展示 6 键（丢 index 日K/龙虎榜等），完整取数
+  结果从未落盘 → 每次重跑历史复盘都实时调东财/腾讯/akshare（502 抖动 + A/B 回测输入不一致）。
+- 落地：
+  1. `reviews.py` 新增 `save_market_data/load_market_data/has_market_data`——把喂给 LLM 的
+     完整结果（blocks + 渲染 market_data 文本 + market_weather + emotion_cycle +
+     degraded_notes + source + saved_at）落盘到 `data/reviews/{date}/market_data.json`
+     （尊重 STOCK_REVIEW_DATA_DIR 隔离）；`fetch_data_node` 实时取数后自动落盘（失败不阻塞）；
+  2. `fetch_data_node` 开头：若该日期 market_data.json 已存在且 mode 匹配且未强制实时 → 直接
+     离线回放（跳过 fetch_mode_data）；source 标「离线回放」，降级说明加
+     「离线回放：复用已缓存行情快照，未实时取数」，返回契约与实时取数完全一致；
+  3. 强制实时开关：`REVIEW_FORCE_FETCH=1/true/on/yes` 或 state.force_fetch 真值；
+  4. `scripts/preheat_reviews.py`：批量预热历史日期（--start/--end/--dates/--force/--fail-fast/
+     --mode/--cache），断点续跑（已有跳过），单日失败打印中文原因默认继续。
+- 坑（测试隔离）：`fetch_data_node` 自动落盘是**进程副作用**——test_graph 各用例共用
+  STOCK_REVIEW_DATA_DIR 时，前一个用例落盘的 date=2026-08-03 market_data.json 会被后续用例
+  离线回放复用，导致 `test_fetch_emotion_cycle_injected`/`degraded` 断言失败（顺序污染）。
+  → conftest.py 新增**函数级 autouse** 数据根隔离 fixture（每测试独立临时目录 + 清理），
+  根治「落盘副作用」类顺序污染；test_graph 的 offline fixture 设 `REVIEW_FORCE_FETCH=1`
+  维持「每次实时取数」的流水线测试语义（离线回放由 test_offline_replay.py 专项覆盖）。
+- 备注/复现：新增 `tests/test_offline_replay.py`（12 用例：存储 roundtrip/回放跳过实时/
+  整图回放/无缓存兼容/强制刷新/确定性/模式不符回退/预热脚本）；全量 744 passed / 53 skipped。
+  教训：**给已有测试逻辑加「读取已落盘产物」的旁路时，必须同步考虑该产物在本进程的重现性**，
+  用 per-test 数据根隔离根除「跨用例副作用」，不要靠临时禁用缓存打补丁。
