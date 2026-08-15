@@ -17,6 +17,7 @@ data_cache/
 output/
 chroma_db/
 .tmp/
+backups/
 
 # ── 凭据 ──
 .env
