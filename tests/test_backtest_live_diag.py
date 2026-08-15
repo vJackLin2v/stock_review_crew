@@ -822,3 +822,160 @@ def test_e3_data_failure_keeps_three_attempts(monkeypatch):
         f"data 类日 day.attempts 应为 3（MAX_ATTEMPTS），实际 {day['attempts']}"
     log = day.get("attempts_log")
     assert log is not None and len(log) == 3, f"data 日 attempts_log 应 3 条，实际 {len(log)}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# F1-F3：回测「快速模式」（lite）验收（docs/requirements-backtest-live-diag.md §追加 2026-08-16）
+#   - F1：lite 回测单日真实链路完成（status=done），report.json 存在且为规则汇总
+#         （文本含「快速模式」、不含「LLM 生成报告失败」）；meta.degraded 含「快速模式」
+#         但 validate_run_product 通过（免 LLM 降级关键词）。
+#   - F2：lite 时 host/report 阶段零 LLM 调用（mock 计数：系统 prompt 命中
+#         HOST_SYSTEM_PROMPT / REVIEW_ASSISTANT_SYSTEM_PROMPT 的 _invoke_llm 调用为 0；
+#         分析师仍走 LLM，故总数 > 0）。
+#   - F3：非 lite 回归——真实链路不带 lite 产出正常报告且不含「快速模式」；
+#         A/D/E 既有用例（mock 链路）确认全绿。
+#
+# 现状说明：实现代理尚未合入 lite（run_review_day 无 lite 参数、graph 的
+# default_initial_state 无 lite、host_node/report_node 无 lite 分支）。
+# 故 F1/F2 本应红——红的原因是「lite 未实现」（TypeError: unexpected keyword 'lite'），
+# 而非测试自身 bug；实现合并后变绿。F3（非 lite）应始终绿。
+#
+# 关键设计：F1/F2 走「真实 run_review_day + LLM/取数 mock 全链路」（复用 offline /
+# fake_fetch 夹具），使 host/report 内部真正进入规则分支而非注入替代实现。
+# lite=True 经 run_review_day → default_initial_state → state["lite"] 透传。
+
+def _read_lite_products(date_str: str):
+    """读真实 run_review_day 落盘的 meta.json / report.json / plan_path。"""
+    from stock_review_crew.storage import reviews as reviews_store
+    from stock_review_crew.accounts import plan as plan_store
+
+    root = reviews_store.reviews_root() / date_str
+    meta = json.loads((root / "meta.json").read_text(encoding="utf-8"))
+    report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+    final = report.get("final_report") or ""
+    return meta, report, final, plan_store.plan_path(date_str)
+
+
+def _count_system_prompt_hits(prompts_module, calls_sys_prompts):
+    """counts 中命中 host/report 系统 prompt 的次数（用于 F2 断言零 LLM）。"""
+    host_hits = sum(1 for sp in calls_sys_prompts
+                    if sp == prompts_module.HOST_SYSTEM_PROMPT)
+    report_hits = sum(1 for sp in calls_sys_prompts
+                      if sp == prompts_module.REVIEW_ASSISTANT_SYSTEM_PROMPT)
+    return host_hits, report_hits
+
+
+def test_f1_lite_real_chain_done_and_rule_report(fake_fetch):
+    """F1：真实 run_review_day(lite=True) 全链路 → 单日完成；
+    report.json 存在且 final_report 含「快速模式」、不含「LLM 生成报告失败」；
+    meta.degraded 含「快速模式」，validate_run_product 通过。
+
+    若实现未合入：run_review_day 无 lite 参数 → TypeError（真实红信号）。
+    """
+    from backend.jobs import run_review_day
+    from stock_review_crew.accounts import plan as plan_store
+
+    plan_store.reset("2026-08-10")
+    try:
+        res = run_review_day("2026-08-10", "close", 2, trace=False, lite=True)
+    except TypeError as exc:  # 实现未合入：lite kwarg 不被接受
+        raise AssertionError(
+            "lite 快速模式未实现：run_review_day 不接受 lite 参数（expected red，"
+            f"待实现代理合入后此用例应变绿）：{exc}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - 真实链路任何失败都视为 lite 路径未打通
+        raise AssertionError(f"lite 真实链路失败（实现未合入或链路不通）：{exc}") from exc
+
+    assert res["record_id"] == "2026-08-10"
+
+    ok, reasons = btest.validate_run_product("2026-08-10")
+    assert ok, f"lite 产物应通过 validate_run_product（不得含 LLM 降级关键词），原因：{reasons}"
+
+    meta, _rpt, final_report, plan_p = _read_lite_products("2026-08-10")
+    # report 为规则汇总特征：含「快速模式」（而非 LLM 生成报告失败）
+    assert "快速模式" in final_report, \
+        f"lite 报告应含「快速模式」，实际报告前 300 字：{final_report[:300]}"
+    assert "LLM 生成报告失败" not in final_report, \
+        "lite 报告不得含「LLM 生成报告失败」（不应走 LLM 失败路径）"
+    # meta.degraded 含「快速模式」但非 LLM 降级关键词
+    degraded_notes = "；".join(meta.get("degraded") or [])
+    assert "快速模式" in degraded_notes, \
+        f"lite 时 meta.degraded 应含「快速模式」，实际：{degraded_notes}"
+    # plan.json 仍落盘（报告级 lite 不破坏计划产物）
+    assert plan_p.exists(), "lite 单日也应产出 plan.json"
+
+
+def test_f2_lite_host_render_zero_llm_calls(fake_fetch, monkeypatch):
+    """F2：lite 真实链路 → host/report 阶段零 LLM 调用。
+
+    验证方法：monkeypatch graph._invoke_llm 为计数包装，记录每次调用的系统
+    prompt；lite 链结束后断言命中 HOST_SYSTEM_PROMPT（主持人）与
+    REVIEW_ASSISTANT_SYSTEM_PROMPT（报告）的调用数为 0，而分析师仍走 LLM
+    （总数 > 0）——证明 lite 只跳过 host/report 的 LLM。
+    """
+    from stock_review_crew import graph
+    from stock_review_crew import prompts as prompts_mod
+    from backend.jobs import run_review_day
+    from stock_review_crew.accounts import plan as plan_store
+
+    calls_sys_prompts: list[str] = []
+    original_invoke = graph._invoke_llm
+
+    def _counting_invoke(llm, messages, timeout=None):
+        # 记录系统 prompt（host/report 用固定系统 prompt 识别）
+        system = ""
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") == "system":
+                system = m.get("content", "")
+        calls_sys_prompts.append(system)
+        return original_invoke(llm, messages)
+
+    monkeypatch.setattr(graph, "_invoke_llm", _counting_invoke)
+
+    plan_store.reset("2026-08-10")
+    try:
+        res = run_review_day("2026-08-10", "close", 2, trace=False, lite=True)
+    except TypeError as exc:  # 实现未合入
+        raise AssertionError(
+            "lite 未实现：run_review_day 不接受 lite 参数，无法验证零 LLM（expected red，"
+            f"待实现后应变绿）：{exc}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise AssertionError(f"lite 真实链路失败：{exc}") from exc
+
+    assert res["record_id"] == "2026-08-10"
+    assert calls_sys_prompts, "lite 链路应至少触发分析师 LLM 调用（分析师不走 lite）"
+
+    host_hits, report_hits = _count_system_prompt_hits(prompts_mod, calls_sys_prompts)
+    assert host_hits == 0, \
+        f"lite 时 host 阶段不应触发 LLM（命中 HOST_SYSTEM_PROMPT 的调用应 0），实际 {host_hits}"
+    assert report_hits == 0, \
+        f"lite 时 report 阶段不应触发 LLM（命中 REVIEW_ASSISTANT_SYSTEM_PROMPT 的调用应 0），实际 {report_hits}"
+    # 反向佐证：分析师确实调了 LLM（否则上面两个断言可能「真空通过」）
+    analyst_llm_hits = len(calls_sys_prompts) - host_hits - report_hits
+    assert analyst_llm_hits > 0, \
+        "分析师阶段应仍走 LLM（总调用应大于 host/report 的 0），避免虚假通过"
+
+
+def test_f3_lite_off_behavior_unchanged(fake_fetch):
+    """F3：非 lite（不带 lite）真实链路 → 行为不变：单日完成、产物通过、
+    报告不含「快速模式」（证明 lite 不影响普通路径）。
+
+    说明：A/D/E 既有用例（A1-A4/A7/D1-D2/E1-E3，mock 链路）均已覆盖非 lite 的
+    编排/重试/耗时/attempts_log/LLM 分类语义，本用例从「真实链路」侧确认非 lite 不回归。
+    """
+    from backend.jobs import run_review_day
+    from stock_review_crew.accounts import plan as plan_store
+
+    plan_store.reset("2026-08-10")
+    res = run_review_day("2026-08-10", "close", 2, trace=False)  # 不带 lite
+    assert res["record_id"] == "2026-08-10"
+
+    ok, reasons = btest.validate_run_product("2026-08-10")
+    assert ok, f"非 lite 产物应通过校验，原因：{reasons}"
+
+    meta, _rpt, final_report, _plan_p = _read_lite_products("2026-08-10")
+    assert "快速模式" not in final_report, \
+        "非 lite 报告不应含「快速模式」（lite 专属标注不污染普通路径）"
+    assert "快速模式" not in "；".join(meta.get("degraded") or []), \
+        "非 lite 时 meta.degraded 不应含「快速模式」"

@@ -396,7 +396,7 @@ def _new_timing_tracker():
 
 
 def run_review_day(date: str, mode: str, max_rounds: int, trace: bool = True,
-                   progress_cb=None, timing_cb=None) -> dict[str, Any]:
+                   progress_cb=None, timing_cb=None, lite: bool = False) -> dict[str, Any]:
     """可复用单日复盘核心（单日 job 与历史回测编排器共用）。
 
     上下文注入 → plan.reset → build_graph(invoke) → build_result → save_review →
@@ -412,6 +412,7 @@ def run_review_day(date: str, mode: str, max_rounds: int, trace: bool = True,
         timing_cb: 阶段/分析师耗时采集钩子，每事件回调
             ``timing_cb(stage, pct, message, meta)``（可选，回测编排器用）。
             注意：进度回调本身也可承载 meta（4 参回调），二选一即可。
+        lite: 快速模式（跳过主持人/报告 LLM，仅数据 + 分析师判断）。
 
     Returns:
         {"record_id", "meta", "report", "snapshot", "quality",
@@ -426,6 +427,7 @@ def run_review_day(date: str, mode: str, max_rounds: int, trace: bool = True,
         earlier_today="\n".join(
             _context_item_text(item) for item in (ctx.get("earlier_today") or [])
         ),
+        lite=lite,
     )
     # 2026-08-10：进度钩子已改 ContextVar（每 job 独立上下文），多任务可并发执行
     # R14 A1：清空当日计划 registry，保证同日重跑整文件覆盖、无残留旧计划
@@ -449,7 +451,7 @@ def run_review_day(date: str, mode: str, max_rounds: int, trace: bool = True,
     # 2026-08-12：LLM 级 Langfuse 回调按 job 开关——前端页面复盘（trace=true）
     # 开启，面板可见全流程（LLM 调用/取数等子 span）；脚本批量（trace=false）关闭
     # （性能 + 不刷屏）。ContextVar 随分析师线程池 copy_context 传播，并发 job 互不干扰。
-    with config.langfuse_callbacks_scope(trace):
+    with config.langfuse_callbacks_scope(trace), graph.set_lite_context(lite):
         state = compiled.invoke(initial)
     report_dict = graph.build_result(state)
 

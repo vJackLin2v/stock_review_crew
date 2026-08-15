@@ -418,6 +418,7 @@ export default function BacktestView({ onBack }) {
   const [startDate, setStartDate] = useState("2026-07-01");
   const [endDate, setEndDate] = useState("2026-08-14");
   const [force, setForce] = useState(false);
+  const [lite, setLite] = useState(false);
   const [maxRounds, setMaxRounds] = useState(3);
   const [bt, setBt] = useState(null);   // 当前展示的回测快照（norm）
   const [btError, setBtError] = useState("");
@@ -500,7 +501,7 @@ export default function BacktestView({ onBack }) {
     setStartBusy(true);
     setBtError("");
     try {
-      const res = await api.startBacktest({ start: startDate, end: endDate, force, max_rounds: maxRounds });
+      const res = await api.startBacktest({ start: startDate, end: endDate, force, lite, max_rounds: maxRounds });
       const id = res && (res.backtest_id || res.id);
       if (!id) throw new Error("后端未返回回测编号");
       const init = normalizeBacktest({
@@ -508,7 +509,7 @@ export default function BacktestView({ onBack }) {
         status: "queued",
         start: startDate,
         end: endDate,
-        params: { force, max_rounds: maxRounds, mode: "close" },
+        params: { force, lite, max_rounds: maxRounds, mode: "close" },
         days_total: 0,
         days_done: 0,
         days: [],
@@ -524,7 +525,7 @@ export default function BacktestView({ onBack }) {
     } finally {
       setStartBusy(false);
     }
-  }, [startDate, endDate, force, maxRounds, beginPolling]);
+  }, [startDate, endDate, force, lite, maxRounds, beginPolling]);
 
   const handleCancel = useCallback(async () => {
     if (!bt || !bt.id) return;
@@ -612,6 +613,14 @@ export default function BacktestView({ onBack }) {
               onChange={(e) => setForce(e.target.checked)}
             />
             强制重跑（忽略已有复盘）
+          </label>
+          <label className="bt-check" title="快速模式：跳过主持人/报告 LLM 调用，仅「数据 + 分析师判断」，用规则汇总生成报告，显著加速回测">
+            <input
+              type="checkbox"
+              checked={lite}
+              onChange={(e) => setLite(e.target.checked)}
+            />
+            快速模式（跳过主持人/报告 LLM，加速）
           </label>
           <label className="form-label bt-field-label bt-sep">最大轮数</label>
           <input

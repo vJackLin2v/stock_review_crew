@@ -60,10 +60,11 @@ _progress_var: Any = None
 _last_pct_var: Any = None
 _progress_lock: Any = None
 _analyst_events_var: Any = None
+_lite_var: Any = None
 
 
 def _progress_context() -> None:
-    global _progress_var, _last_pct_var, _progress_lock, _analyst_events_var
+    global _progress_var, _last_pct_var, _progress_lock, _analyst_events_var, _lite_var
     import contextvars
     import threading
 
@@ -78,6 +79,10 @@ def _progress_context() -> None:
         # 默认关。开启后引擎回调收到 4 参（带 meta）；关闭时 _run_analysts 不发射该
         # 子事件，杜绝「既有 3 参回调/测试替换 _emit」被 meta 关键字破坏。
         _analyst_events_var = contextvars.ContextVar("review_analyst_events", default=False)
+        # 2026-08-16（快速模式）：lite 快速模式标志——经 ContextVar 随
+        # compiled.invoke 传播到 host/report 节点（ReviewState 未声明 lite 字段，
+        # 额外键会在 graph invoke 时被丢弃，故用 ContextVar 承载）。
+        _lite_var = contextvars.ContextVar("review_lite", default=False)
 
 
 def set_progress_callback(callback, analyst_events: bool = False):
@@ -96,6 +101,37 @@ def _analyst_sub_events_enabled() -> bool:
     """当前构建是否开启分析师粒度子事件（供 _run_analysts 决定是否发射 meta 事件）。"""
     _progress_context()
     return bool(_analyst_events_var.get())
+
+
+class _LiteCtx:
+    """lite 快速模式上下文管理器（with set_lite_context(True): invoke(...)）。"""
+
+    def __init__(self, flag: bool):
+        _progress_context()
+        self._token = _lite_var.set(bool(flag))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        _lite_var.reset(self._token)
+        return False
+
+
+def set_lite_context(flag: bool):
+    """快速模式 ContextVar 上下文管理器：``with set_lite_context(True): compiled.invoke(initial)``。
+
+    宿主（backend.jobs.run_review_day / 回测编排器）用其包裹 invoke，使 host/report
+    节点读到 lite=True；ReviewState 未声明 lite 字段（额外键会被 LangGraph invoke 丢弃），
+    故以 ContextVar 承载，多任务并发时互不覆盖。
+    """
+    return _LiteCtx(flag)
+
+
+def _lite_active() -> bool:
+    """当前 invoke 线程是否处于 lite 快速模式（host/report 节点读取）。"""
+    _progress_context()
+    return bool(_lite_var.get())
 
 
 def _reset_progress():
@@ -1473,9 +1509,11 @@ def host_node(state):
     """
     _emit("host", 50, "主持人判断（分歧点）…")
 
+    # lite：ContextVar（随 invoke 传播）优先，state.get("lite") 兜底（兼容未来加入 schema）
+    lite = _lite_active() or bool(state.get("lite"))
     content = None
     degraded = False
-    if _llm_ready():
+    if not lite and _llm_ready():
         try:
             _, strict = _llm_pair()
             content = _invoke_llm(
@@ -1488,15 +1526,23 @@ def host_node(state):
         except Exception:
             content = None
     if content is None:
-        degraded = True
         has_disagreement, topic = _rule_host(state)
-        # R16：规则降级版分歧判断文本（格式：分歧判断/讨论议题 + 一句话说明），
-        # 供报告「分歧点」章节直接引用
-        host_analysis = (
-            f"分歧判断：{'有' if has_disagreement else '无'}\n"
-            f"讨论议题：{topic or '无'}\n"
-            "（降级模式：LLM 不可用，分歧判断由规则引擎按指数方向与情绪数据判定）"
-        )
+        if lite:
+            # 快速模式：不视为降级（degraded 保持 False），文本标注「快速模式」
+            host_analysis = (
+                f"分歧判断：{'有' if has_disagreement else '无'}\n"
+                f"讨论议题：{topic or '无'}\n"
+                "（快速模式：跳过主持人 LLM 调用，分歧判断由规则引擎按指数方向与情绪数据判定）"
+            )
+        else:
+            degraded = True
+            # R16：规则降级版分歧判断文本（格式：分歧判断/讨论议题 + 一句话说明），
+            # 供报告「分歧点」章节直接引用
+            host_analysis = (
+                f"分歧判断：{'有' if has_disagreement else '无'}\n"
+                f"讨论议题：{topic or '无'}\n"
+                "（降级模式：LLM 不可用，分歧判断由规则引擎按指数方向与情绪数据判定）"
+            )
     else:
         has_disagreement, topic = _parse_host(content)
         host_analysis = content
@@ -1504,6 +1550,21 @@ def host_node(state):
     new_round = state.get("round_count", 0) + 1
     max_rounds = max(1, min(int(state.get("max_rounds") or 3), 3))
     discussion_done = (not has_disagreement) or (new_round > max_rounds) or (not topic)
+    # 快速模式：沿用既有 degraded_notes（不写 LLM 降级标注），host 自身不新增降级
+    if lite:
+        notes = list(state.get("degraded_notes") or [])
+        # 追加快速模式说明（不含 LLM_DEGRADED_MARKERS，validate_run_product 放行）
+        _lite_host_note = "快速模式：跳过主持人 LLM 调用"
+        if _lite_host_note not in notes:
+            notes.append(_lite_host_note)
+        return {
+            "host_analysis": host_analysis,
+            "discussion_topic": topic,
+            "discussion_done": discussion_done,
+            "round_count": new_round,
+            "degraded": bool(state.get("degraded")),
+            "degraded_notes": notes,
+        }
     return {
         "host_analysis": host_analysis,
         "discussion_topic": topic,
@@ -1696,8 +1757,29 @@ def report_node(state):
     """Node5：LLM 汇总生成报告。
     2026-08-10（用户确认）：LLM 不可用/失败时**直接终止复盘**（抛 DataValidationError →
     任务标记 error），不再降级生成规则报告——LLM 都不可用时复盘无意义。
+    lite（快速模式 2026-08-16）：跳过 LLM，直接用规则汇总生成 report + tags，
+    不抛 LLM 错误；degraded_notes 追加「快速模式」（不含 LLM_DEGRADED_MARKERS）。
     """
     _emit("report", 85, "正在生成复盘报告…")
+
+    if _lite_active() or state.get("lite"):
+        # 快速模式：规则汇总报告 + 规则标签；report 内「降级模式」→「快速模式」
+        report = _rule_report(state).replace("降级模式", "快速模式")
+        tags = _extract_tags(report)
+        report = ensure_disclaimer(report)
+        degraded_notes = list(state.get("degraded_notes") or [])
+        _lite_note = "快速模式：跳过报告 LLM 调用（规则汇总）"
+        if _lite_note not in degraded_notes:
+            degraded_notes.append(_lite_note)
+        _emit("report", 90, "报告生成完成")
+        _emit("done", 100, "复盘完成")
+        return {
+            "final_report": report,
+            "overall_tags": tags or [],
+            "degraded": bool(state.get("degraded")),
+            "degraded_notes": degraded_notes,
+        }
+
     report = None
     tags = []
     if not _llm_ready():
@@ -1772,12 +1854,18 @@ def report_node(state):
 # ═══════════════════════════════════════════════════════════════
 
 def default_initial_state(date, mode=DEFAULT_MODE, max_rounds=3,
-                          yesterday_report="", earlier_today="", skill_names=None):
-    """完整初始状态（I4 上下文注入：yesterday_report / earlier_today，缺失为空串）。"""
+                          yesterday_report="", earlier_today="", skill_names=None,
+                          lite=False):
+    """完整初始状态（I4 上下文注入：yesterday_report / earlier_today，缺失为空串）。
+
+    lite=True 时启用「快速模式」：跳过主持人/报告 LLM 调用（data.py 需求
+    requirements-backtest-live-diag.md「快速模式」章节），仅做数据 + 分析师判断。
+    """
     return {
         "date": date,
         "mode": mode,
         "max_rounds": max_rounds,
+        "lite": bool(lite),
         "yesterday_report": yesterday_report or "",
         "earlier_today": earlier_today or "",
         "skill_names": list(skill_names or []),

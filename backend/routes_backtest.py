@@ -27,6 +27,9 @@ def backtest_start(payload: Any = Body(...)) -> dict[str, str]:
     """启动一次历史回测（单 running 互斥）。"""
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+    # 快速模式（lite）：可选，默认 False——回测跳过主持人/报告 LLM，仅数据 + 分析师判断
+    payload = dict(payload)
+    payload["lite"] = bool(payload.get("lite"))
     bt_id = backtest.start_backtest(payload)
     return {"backtest_id": bt_id}
 

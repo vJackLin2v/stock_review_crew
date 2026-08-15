@@ -598,6 +598,7 @@ export function normalizeBacktest(raw = {}) {
       force: !!params.force,
       max_rounds: nullable(params.max_rounds),
       mode: str(params.mode, "close"),
+      lite: !!params.lite,
     },
     created_at: str(x.created_at),
     finished_at: str(x.finished_at),

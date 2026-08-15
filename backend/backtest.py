@@ -310,11 +310,17 @@ def _run_one_day(bt: dict, day_index: int) -> None:
         day["attempts"] = max_attempts
         _update_current("review", "", 0.0, persist=True)
         _t1 = time.monotonic()
+        # 快速模式（lite）：仅在开启时传 lite=True 给 run_review_day；非 lite 不传关键字，
+        # 兼容既有 mock 注入实现（make_fake_day 等签名不接受 lite）与既有契约。
+        _review_kw: dict[str, Any] = {}
+        if params.get("lite"):
+            _review_kw["lite"] = True
         try:
             result = _run_review_day_impl(
                 date_str, params.get("mode", "close"),
                 params.get("max_rounds", 3), trace=False,
                 progress_cb=_timing_cb,
+                **_review_kw,
             )
         except Exception as exc:  # noqa: BLE001 - DataValidationError 等一律按单日失败处理
             logger.warning("[backtest] %s 第 %d 次失败：%s", date_str, attempt, exc)
@@ -526,6 +532,8 @@ def start_backtest(params: dict) -> str:
         max_rounds = 3
     max_rounds = max(1, min(max_rounds, 3))
     force = bool(params.get("force"))
+    # 快速模式（lite）：跳过主持人/报告 LLM，仅数据 + 分析师判断
+    lite = bool(params.get("lite"))
     days = trading_dates(start, end)
     if not days:
         raise HTTPException(status_code=400, detail=f"所选范围（{start} 至 {end}）内无交易日")
@@ -542,6 +550,7 @@ def start_backtest(params: dict) -> str:
         "start": start,
         "end": end,
         "force": force,
+        "lite": lite,
         "max_rounds": max_rounds,
         "mode": mode,
     }

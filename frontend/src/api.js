@@ -764,6 +764,7 @@ export async function startBacktest(payload) {
         force: !!(payload && payload.force),
         max_rounds: Number(payload && payload.max_rounds) || 3,
         mode: String(payload && payload.mode || "close").trim(),
+        lite: !!(payload && payload.lite),
       }),
     });
     if (!res.ok) throw await errorFrom(res, "启动回测失败");
