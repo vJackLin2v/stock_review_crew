@@ -10,6 +10,8 @@ import {
   buildMockRealtime,
   buildMockReviewDetail,
   buildMockSectorHeat,
+  buildMockBacktestDetail,
+  buildMockBacktestHistory,
   isoDate,
   mockChatReply,
   mockChatSessionList,
@@ -747,6 +749,93 @@ function mockAccountDetail(skillId) {
     total_return_rate: Math.round((last.total_assets / 100000 - 1) * 10000) / 10000,
     updated_at: `${ACCT_DAYS[ACCT_DAYS.length - 1]} 15:05:00`,
   };
+}
+
+// ---------- 历史回测（requirements-backtest-ui §四 契约；请求优先，mock 仅离线兜底）----------
+// POST /api/backtest/start {start, end, force?, max_rounds?, mode?} → {backtest_id}
+export async function startBacktest(payload) {
+  try {
+    const res = await fetchWithTimeout("/api/backtest/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        start: String(payload && payload.start || "").trim(),
+        end: String(payload && payload.end || "").trim(),
+        force: !!(payload && payload.force),
+        max_rounds: Number(payload && payload.max_rounds) || 3,
+        mode: String(payload && payload.mode || "close").trim(),
+      }),
+    });
+    if (!res.ok) throw await errorFrom(res, "启动回测失败");
+    return await res.json();
+  } catch (err) {
+    if (canFallback()) return startOfflineBacktest(payload);
+    if (err instanceof ApiError) throw err;
+    throw new ApiError("无法连接后端服务，请确认服务已启动");
+  }
+}
+
+// GET /api/backtest/{id} → §三 完整对象
+export async function getBacktest(id) {
+  const key = String(id || "").trim();
+  if (mockBacktests.has(key)) return pollMockBacktest(key);
+  return requestJson(`/api/backtest/${encodeURIComponent(key)}`);
+}
+
+// POST /api/backtest/{id}/cancel → {ok:true}
+export async function cancelBacktest(id) {
+  const key = String(id || "").trim();
+  if (key && mockBacktests.has(key)) {
+    const bt = mockBacktests.get(key);
+    bt.cancelled = true;
+    return { ok: true };
+  }
+  let res;
+  try {
+    res = await fetchWithTimeout(`/api/backtest/${encodeURIComponent(key)}/cancel`, {
+      method: "POST",
+    });
+  } catch (err) {
+    if (canFallback()) return { ok: true };
+    if (err instanceof ApiError) throw err;
+    throw new ApiError("无法连接后端服务，请确认服务已启动");
+  }
+  if (!res.ok) throw await errorFrom(res, "取消回测失败");
+  return await res.json();
+}
+
+// GET /api/backtest/history → {runs:[...]}（created_at 倒序，上限 20）
+export async function getBacktestHistory() {
+  try {
+    const data = await requestJson("/api/backtest/history");
+    return { data, offline: false };
+  } catch (err) {
+    if (canFallback()) return { data: buildMockBacktestHistory(), offline: true };
+    throw err;
+  }
+}
+
+// ---- 离线 mock 回测（仅 DEV 降级；每次轮询推进 done 数，模拟逐日进度）----
+// mockBacktests: Map<id, { done, cancelled }>，结构对齐 §三 快照
+const mockBacktests = new Map();
+let mockBacktestSeq = 0;
+const MOCK_BT_TOTAL_DAYS = 33;
+
+function startOfflineBacktest(payload) {
+  const id = `bt_mock_${Date.now()}_${mockBacktestSeq++}`;
+  mockBacktests.set(id, { done: 0, cancelled: false, start: (payload && payload.start) || "2026-07-01", end: (payload && payload.end) || "2026-08-14" });
+  return { backtest_id: id, offline: true };
+}
+
+function pollMockBacktest(id) {
+  const bt = mockBacktests.get(id);
+  if (!bt) throw new ApiError("回测任务不存在");
+  if (bt.cancelled) {
+    const cancelled = buildMockBacktestDetail(id, bt.done);
+    return { ...cancelled, status: "cancelled" };
+  }
+  if (bt.done < MOCK_BT_TOTAL_DAYS) bt.done += 1;
+  return { ...buildMockBacktestDetail(id, bt.done), offline: true };
 }
 
 // ---------- 聊天 ----------

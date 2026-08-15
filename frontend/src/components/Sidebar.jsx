@@ -23,6 +23,8 @@ export default function Sidebar({
   onStartReview,
   // R12-A3：侧栏「模拟账户」入口
   onOpenAccounts,
+  // requirements-backtest-ui：侧栏「回测」入口
+  onOpenBacktest,
 }) {
   const [confirmReviewKey, setConfirmReviewKey] = useState(null);
   const [confirmChatId, setConfirmChatId] = useState(null);
@@ -179,6 +181,15 @@ export default function Sidebar({
         title="模拟账户"
       >
         <span className="new-text">模拟账户</span>
+      </button>
+
+      {/* requirements-backtest-ui：历史回测独立视图入口 */}
+      <button
+        className="btn btn-outline new-btn"
+        onClick={pick(onOpenBacktest)}
+        title="历史回测"
+      >
+        <span className="new-text">回测</span>
       </button>
 
       {/* 运行中任务指示器：切换视图不丢任务，一键回到进度/结果 */}

@@ -527,3 +527,76 @@ export function normalizeMarketStyle(raw = {}) {
     degraded_reason: arr(x.degraded_reason),
   };
 }
+
+// ---- 历史回测（requirements-backtest-ui §三/§四 契约）----
+export function normalizeBacktestStage(s = {}) {
+  const x = s && typeof s === "object" ? s : {};
+  return {
+    key: str(x.key),
+    elapsed_ms: nullable(x.elapsed_ms),
+    analysts: arr(x.analysts).map((a) => ({
+      skill_id: str(a && (a.skill_id || a.id)),
+      name: str(a && (a.name || a.skill_name)),
+      elapsed_ms: nullable(a && a.elapsed_ms),
+    })),
+  };
+}
+
+export function normalizeBacktestDay(d = {}) {
+  const x = d && typeof d === "object" ? d : {};
+  const settle = x.settle || {};
+  const review = x.review || {};
+  const status = str(x.status, "pending");
+  return {
+    date: str(x.date),
+    status,
+    attempt: nullable(x.attempt),
+    attempts: nullable(x.attempts),
+    elapsed_ms: nullable(x.elapsed_ms),
+    settle: {
+      elapsed_ms: nullable(settle.elapsed_ms),
+      filled: nullable(settle.filled),
+      rejected: nullable(settle.rejected),
+      quotes_missing: nullable(settle.quotes_missing),
+    },
+    review: { elapsed_ms: nullable(review.elapsed_ms) },
+    stages: arr(x.stages).map(normalizeBacktestStage),
+    error: str(x.error),
+    isFailed: status === "failed",
+    isSkipped: status === "skipped",
+  };
+}
+
+export function normalizeBacktest(raw = {}) {
+  const x = raw && typeof raw === "object" ? raw : {};
+  const params = x.params || {};
+  const current = x.current || {};
+  const status = str(x.status, "running");
+  return {
+    id: str(x.id || x.backtest_id || x.bt_id),
+    status,
+    start: str(x.start),
+    end: str(x.end),
+    params: {
+      force: !!params.force,
+      max_rounds: nullable(params.max_rounds),
+      mode: str(params.mode, "close"),
+    },
+    created_at: str(x.created_at),
+    finished_at: str(x.finished_at),
+    days_total: nullable(x.days_total),
+    days_done: nullable(x.days_done),
+    current: { date: str(current.date), stage: str(current.stage) },
+    total_elapsed_ms: nullable(x.total_elapsed_ms),
+    days: arr(x.days).map(normalizeBacktestDay),
+    offline: !!x.offline,
+    isRunning: status === "queued" || status === "running",
+    isDone: status === "done",
+    isError: status === "error",
+    isCancelled: status === "cancelled",
+  };
+}
+
+export function normalizeBacktestHistoryItem(raw = {}) {
+  return normalizeBacktest(raw);
+}

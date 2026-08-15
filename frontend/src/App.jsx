@@ -17,6 +17,8 @@ import StockDetail from "./components/StockDetail";
 import SettingsView from "./components/SettingsView";
 // R12-A3：侧栏「模拟账户」独立视图（分析师模拟账户展示）
 import AccountsPanel from "./components/AccountsPanel";
+// requirements-backtest-ui：侧栏「回测」独立视图（历史回测可视化）
+import BacktestView from "./components/BacktestView";
 import { applyToDom, loadSettings } from "./settings";
 import { setNewsEnabled } from "./stages";
 
@@ -29,7 +31,7 @@ export default function App() {
     }
   });
   const [sidebarOpen, setSidebarOpen] = useState(false); // 移动端抽屉
-  // 视图：home | progress | report | stock | settings | accounts
+  // 视图：home | progress | report | stock | settings | accounts | backtest
   const [view, setView] = useState("home");
   // R11-R1：首页 Tab（data | review | chat | trades），默认首个 Tab = 数据展示
   const [homeTab, setHomeTab] = useState("data");
@@ -296,6 +298,12 @@ export default function App() {
     setView("accounts");
   }, []);
 
+  // requirements-backtest-ui：侧栏「回测」→ 独立视图（BacktestView 自带返回）
+  const handleOpenBacktest = useCallback(() => {
+    setSidebarOpen(false);
+    setView("backtest");
+  }, []);
+
   const handleSelectChatSession = useCallback((id) => {
     setChatIntent(null);
     setActiveChatSessionId(id);
@@ -332,11 +340,13 @@ export default function App() {
         ? report
           ? `复盘报告 · ${report.meta.mode_label || ""}`
           : "复盘报告"
-          : view === "accounts"
-            ? "模拟账户"
-          : view === "settings"
-            ? "设置"
-          : "首页";
+        : view === "accounts"
+          ? "模拟账户"
+          : view === "backtest"
+            ? "历史回测"
+            : view === "settings"
+              ? "设置"
+              : "首页";
 
   return (
     <ErrorBoundary onReset={handleNew}>
@@ -367,6 +377,7 @@ export default function App() {
           onDeleteChatSession={handleDeleteChatSession}
           onOpenSettings={handleOpenSettings}
           onOpenAccounts={handleOpenAccounts}
+          onOpenBacktest={handleOpenBacktest}
         />
         <main className="main">
           <header className="topbar">
@@ -418,6 +429,8 @@ export default function App() {
               <SettingsView />
             ) : view === "accounts" ? (
               <AccountsPanel onBack={handleNew} />
+            ) : view === "backtest" ? (
+              <BacktestView onBack={handleNew} />
             ) : (
               <HomeView
                 homeTab={homeTab}

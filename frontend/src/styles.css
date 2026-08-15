@@ -2589,3 +2589,188 @@ html[data-font="xlarge"] body { font-size: 17px; }
 .table-sm td {
   padding: 5px 8px;
 }
+
+/* ---------- requirements-backtest-ui：历史回测可视化 ---------- */
+.bt-wrap { display: flex; flex-direction: column; gap: 16px; }
+.bt-top,
+.bt-progress,
+.bt-history { min-width: 0; }
+.bt-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.bt-field-label { margin-bottom: 0; white-space: nowrap; }
+.bt-field { width: auto; min-width: 132px; }
+.bt-num { min-width: 72px; width: 86px; }
+.bt-sep { margin-left: 6px; }
+.bt-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-2);
+  margin-left: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.bt-check input { accent-color: var(--accent); }
+.bt-error { color: var(--danger, #e03131); font-size: 13px; margin: 4px 0 10px; }
+.bt-top-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+
+/* 状态徽标 */
+.bt-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 2px 9px;
+  border-radius: 99px;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.bt-status-ok { background: rgba(12, 166, 120, 0.12); color: var(--down); }
+.bt-status-fail { background: rgba(224, 49, 49, 0.12); color: var(--up); }
+.bt-status-run { background: rgba(92, 124, 250, 0.14); color: #5c7cfa; }
+.bt-status-skip { background: var(--bg-soft); color: var(--text-3); }
+.bt-status-pending { background: var(--bg-soft); color: var(--text-3); }
+
+/* 总进度区 */
+.bt-progress-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0 4px; }
+.bt-progress-label { font-size: 12.5px; color: var(--text-2); font-weight: 600; }
+.bt-progress-pct { font-size: 12.5px; font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; }
+.bt-progress-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  margin-top: 10px;
+}
+.bt-progress-meta b { color: var(--text); }
+.bt-section-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-2);
+  margin: 18px 0 8px;
+}
+.bt-chart-block { margin-top: 6px; }
+
+/* 每天列表 */
+.bt-days { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.bt-day { border-bottom: 1px solid var(--border-soft); background: var(--card); }
+.bt-day:last-child { border-bottom: none; }
+.bt-day.current { background: rgba(92, 124, 250, 0.05); }
+.bt-day.failed { background: rgba(224, 49, 49, 0.03); }
+.bt-day-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1.4fr) 84px 92px 116px 92px minmax(120px, 1.6fr) 22px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 8px 12px;
+  text-align: left;
+  color: var(--text);
+  font-size: 13px;
+}
+.bt-day-row:disabled { cursor: default; }
+.bt-day-row:hover:not(:disabled) { background: var(--hover); }
+.bt-day-date { display: flex; align-items: center; gap: 6px; font-weight: 600; white-space: nowrap; }
+.bt-current-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #5c7cfa; flex-shrink: 0;
+  animation: bt-pulse 1.4s ease-in-out infinite;
+}
+@keyframes bt-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.8); }
+}
+.bt-cell { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bt-cell-ms { color: var(--text-2); }
+.bt-cell-reason { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bt-fail-reason { color: var(--up); font-size: 12px; }
+.bt-row-caret { color: var(--text-3); text-align: center; }
+
+.bt-day-body { padding: 4px 12px 14px; border-top: 1px dashed var(--border-soft); }
+.bt-detail-title { font-size: 12.5px; font-weight: 700; color: var(--text-2); margin: 10px 0 8px; }
+.bt-settle-summary { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12.5px; color: var(--text-2); margin-bottom: 10px; }
+.bt-settle-count b { font-variant-numeric: tabular-nums; }
+.bt-detail-sub {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-3);
+  margin: 10px 0 4px;
+  letter-spacing: 0.4px;
+}
+.bt-bar-row {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr) 96px;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 12.5px;
+}
+.bt-bar-label { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bt-bar-track {
+  height: 9px;
+  background: var(--bg-soft);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.bt-bar-fill { height: 100%; border-radius: 99px; transition: width .25s ease; }
+.bt-bar-value { text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bt-day-error {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--up);
+  background: rgba(224, 49, 49, 0.06);
+  border: 1px solid rgba(224, 49, 49, 0.2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  line-height: 1.5;
+}
+.bt-error-title { font-weight: 700; }
+
+/* 空态 / 历史 */
+.bt-empty-state { text-align: center; padding: 40px 20px; }
+.bt-empty-title { font-size: 15px; font-weight: 700; color: var(--text-2); }
+.bt-empty-sub { font-size: 12.5px; color: var(--text-3); margin-top: 6px; }
+.bt-hist-empty { font-size: 13px; color: var(--text-3); padding: 8px 0; }
+.bt-hist-item {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.6fr) 90px 1fr;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border-soft);
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.bt-hist-item:hover { background: var(--hover); }
+.bt-hist-item:last-child { border-bottom: none; }
+.bt-hist-range { font-weight: 600; white-space: nowrap; }
+.bt-hist-meta { color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+@media (max-width: 768px) {
+  .bt-day-row {
+    grid-template-columns: minmax(82px, 1.2fr) 72px 1fr;
+    gap: 6px;
+  }
+  .bt-day-row .bt-cell-ms:first-of-type { display: none; }
+  .bt-cell-reason { display: none; }
+  .bt-bar-row { grid-template-columns: 106px minmax(0, 1fr) 88px; }
+  .bt-hist-item { grid-template-columns: 1fr 78px; }
+  .bt-hist-meta { grid-column: 1 / -1; }
+}

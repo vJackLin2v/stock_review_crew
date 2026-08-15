@@ -798,3 +798,158 @@ export function mockWatchlistReorder(codes) {
   mockWatchlist = [...ordered, ...rest];
   return { codes: mockWatchlist.map((x) => x.code) };
 }
+
+// ==================== 回测 mock（结构对齐 requirements-backtest-ui §三 契约） ====================
+// 仅 DEV 降级 / 离线演示：生成一个「逐日跑复盘 + 撮合」的进度快照，含每天 settle/review
+// 耗时、4 个节点耗时、5 位分析师各自耗时，与后端 GET /api/backtest/{id} 返回结构一致。
+
+const BACKTEST_POOL = [
+  { start: "2026-07-01", end: "2026-08-14" },
+  { start: "2026-06-01", end: "2026-07-01" },
+  { start: "2026-05-01", end: "2026-05-29" },
+];
+
+// 生成 start~end 区间的交易日列表（跳过周末，与后端一致）
+function tradingDays(start, end) {
+  const days = [];
+  const d = new Date(`${start}T00:00:00`);
+  const ed = new Date(`${end}T00:00:00`);
+  const p = (x) => String(x).padStart(2, "0");
+  while (d <= ed) {
+    const wd = d.getDay();
+    if (wd !== 0 && wd !== 6) {
+      days.push(`${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`);
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return days;
+}
+
+// 以 s 为种子生成确定性伪随机（复读同一步骤得到相同耗时）
+function btRng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function buildBtDay(date, rng, done) {
+  if (!done) {
+    // 尚未开始/进行中的占位
+    return {
+      date,
+      status: "pending",
+      attempt: 0,
+      attempts: 1,
+      elapsed_ms: 0,
+      settle: { elapsed_ms: 0, filled: 0, rejected: 0, quotes_missing: 0 },
+      review: { elapsed_ms: 0 },
+      stages: [],
+      error: null,
+    };
+  }
+  const settleMs = Math.round((80 + rng() * 200) * rng());
+  const fetchMs = Math.round(300 + rng() * 2500);
+  const analystMs = Math.round(4000 + rng() * 9000);
+  const hostMs = Math.round(300 + rng() * 1500);
+  const reportMs = Math.round(400 + rng() * 2000);
+  const reviewMs = fetchMs + analystMs + hostMs + reportMs;
+  const filled = Math.floor(rng() * 5);
+  const rejected = Math.floor(rng() * 4);
+  const failed = rng() < 0.08; // 少量样本失败（演示 fail-fast）
+  return {
+    date,
+    status: failed ? "failed" : "done",
+    attempt: failed ? 1 : (rng() < 0.15 ? 2 : 1),
+    attempts: failed ? 1 : 2,
+    elapsed_ms: failed ? reviewMs + settleMs : reviewMs + settleMs + Math.round(rng() * 200),
+    settle: {
+      elapsed_ms: settleMs,
+      filled,
+      rejected,
+      quotes_missing: rng() < 0.2 ? Math.floor(rng() * 3) : 0,
+    },
+    review: { elapsed_ms: reviewMs },
+    stages: [
+      { key: "fetch", elapsed_ms: fetchMs },
+      {
+        key: "analysts",
+        elapsed_ms: analystMs,
+        analysts: ANALYSTS.map((a) => ({
+          skill_id: a.id,
+          name: a.skill_name,
+          elapsed_ms: Math.round((analystMs * (0.12 + rng() * 0.35)) / 10) * 10,
+        })),
+      },
+      { key: "host", elapsed_ms: hostMs },
+      { key: "report", elapsed_ms: reportMs },
+    ],
+    error: failed ? "单日复盘在报告阶段失败（演示 fail-fast，对齐回测契约）" : null,
+  };
+}
+
+// 生成 upTo 天已完成、其余 pending 的回测快照（status 由 doneCount 与 total 推导）
+function buildBtSnapshot(id, rangeIndex, doneCount) {
+  const days = tradingDays(BACKTEST_POOL[rangeIndex].start, BACKTEST_POOL[rangeIndex].end);
+  const total = days.length;
+  const done = Math.max(0, Math.min(doneCount, total));
+  const expectedToday = Math.floor(done * (0.55 + 0.45 * rangeIndex) * 100) / 100;
+  const rng = btRng((done + 1) * 977);
+  const list = days.map((date, i) => {
+    if (i < done) {
+      return buildBtDay(date, btRng(i * 31 + rangeIndex * 71), true);
+    }
+    if (i === done && done < total) {
+      return { ...buildBtDay(date, rng, false), status: "running" };
+    }
+    return buildBtDay(date, rng, false);
+  });
+  // 若当前日（running 前一日）失败，则整场 status=error（fail-fast）
+  const failedToday = done > 0 && list[done - 1].status === "failed";
+  const completedMs = list
+    .filter((x) => x.status === "done" || x.status === "failed")
+    .reduce((a, x) => a + (x.elapsed_ms || 0), 0);
+  const current =
+    done < total
+      ? { date: list[Math.max(0, done)].date, stage: "analysts" }
+      : { date: days[days.length - 1], stage: "done" };
+  const status =
+    done >= total ? "done" : failedToday ? "error" : "running";
+  const now = new Date();
+  const pad2 = (x) => String(x).padStart(2, "0");
+  return {
+    id,
+    status,
+    start: BACKTEST_POOL[rangeIndex].start,
+    end: BACKTEST_POOL[rangeIndex].end,
+    params: { force: false, max_rounds: 3, mode: "close" },
+    created_at: `${isoDate(now)}T${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`,
+    finished_at: status === "done" ? `${isoDate(now)}T${pad2(now.getHours())}:${pad2(now.getMinutes())}:30` : null,
+    days_total: total,
+    days_done: done,
+    current,
+    total_elapsed_ms: Math.round(completedMs * expectedToday),
+    days: list,
+  };
+}
+
+// 历史 runs（GET /api/backtest/history · {runs:[...]} 完整快照 + 摘要）
+export function buildMockBacktestHistory() {
+  return {
+    runs: [
+      { id: "bt_20260810_103000", start: "2026-07-01", end: "2026-08-14", status: "done", created_at: "2026-08-10T10:30:00", finished_at: "2026-08-10T10:52:10", days_done: 33, days_total: 33, total_elapsed_ms: 1582000 },
+      { id: "bt_20260805_091500", start: "2026-06-01", end: "2026-07-01", status: "done", created_at: "2026-08-05T09:15:00", finished_at: "2026-08-05T09:30:42", days_done: 22, days_total: 22, total_elapsed_ms: 942000 },
+      { id: "bt_20260811_143000", start: "2026-07-01", end: "2026-08-14", status: "cancelled", created_at: "2026-08-11T14:30:00", finished_at: null, days_done: 9, days_total: 33, total_elapsed_ms: 310000 },
+    ],
+  };
+}
+
+// 单个回测完整快照（GET /api/backtest/{id}）
+let mockBtSeq = 0;
+export function buildMockBacktestDetail(id, doneCount) {
+  return buildBtSnapshot(id || `bt_mock_${++mockBtSeq}`, 0, doneCount);
+}
