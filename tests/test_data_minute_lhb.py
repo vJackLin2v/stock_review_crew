@@ -21,6 +21,12 @@ from test_data_common import clear_module_caches, fresh_tmp_dir  # noqa: E402
 def _clean(monkeypatch):
     clear_module_caches(sd)
     monkeypatch.delenv("STOCK_DATA_CACHE_ENABLED", raising=False)
+    # 本地缓存（降级链第三环）默认读仓库 data_cache/；不隔离时，测试日期的缓存块
+    # （如 data_cache/2026-07-31/block_lhb.json）命中会让「全源失败→数据缺失」
+    # 断言错得「本地缓存」——重定向到空临时缓存目录令该环节确定性命中失败
+    # （与 PLAYBOOK 降级断言环境耦合→隔离 一致；缓存命中用例自行 setenv 种子目录）。
+    import test_data_common as _tdc
+    monkeypatch.setenv("STOCK_DATA_CACHE_DIR", str(_tdc.fresh_tmp_dir("lhb_iso")))
 
 
 # ── 分时/分钟线 ──

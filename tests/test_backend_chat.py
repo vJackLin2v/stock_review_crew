@@ -69,14 +69,18 @@ class FakeStreamLLM(FakeLLM):
 
 @pytest.fixture()
 def iso_dirs(monkeypatch):
-    """隔离存储目录（自建并清理）。"""
+    """隔离存储目录（自建并清理）。
+
+    STOCK_REVIEW_DATA_DIR=数据根（base）；本批聊天用例不直接断言 reviews 落盘位置，
+    统一按数据根语义设置即可（reviews_root() 拼 base/reviews）。
+    """
     base = Path(__file__).resolve().parent.parent / ".tmp" / f"chat_backend_test_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     chats_dir = base / "chats"
     reviews_dir = base / "reviews"
     chats_dir.mkdir(parents=True, exist_ok=True)
     reviews_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("CHATS_DATA_DIR", str(chats_dir))
-    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(reviews_dir))
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(base))
     yield {"base": base, "chats": chats_dir}
     shutil.rmtree(base, ignore_errors=True)
 

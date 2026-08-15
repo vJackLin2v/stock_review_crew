@@ -23,9 +23,13 @@ from stock_review_crew.storage.reviews import (  # noqa: E402
     context,
     delete_review,
     get_review,
+    has_market_data,
     has_review,
     list_reviews,
+    load_market_data,
+    market_data_path,
     reviews_root,
+    save_market_data,
     save_review,
 )
 
@@ -48,11 +52,16 @@ def iso_dir():
 
 @pytest.fixture()
 def store(iso_dir, monkeypatch):
-    """隔离存储根目录 + 归档根目录。"""
-    root = iso_dir / "reviews"
-    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(root))
+    """隔离存储根目录 + 归档根目录（统一 env=数据根语义）。
+
+    STOCK_REVIEW_DATA_DIR=数据根（iso_dir），reviews_root() 拼 /reviews 后即 iso_dir/reviews，
+    正好是 tests 期望的 reviews 产物根。store 返回 reviews 根（iso_dir/reviews），
+    与 reviews_root() 返回值一致。
+    """
+    store_root = iso_dir / "reviews"
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(iso_dir))
     monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(iso_dir / "archive"))
-    return root
+    return store_root
 
 
 def _meta(date="2026-07-31", time="110150", mode="intraday_am", **extra):
@@ -427,3 +436,43 @@ def test_roots_default_and_isolation(store):
         assert archive_root() == repo / "output" / "archive"
     finally:
         monkeypatch.undo()
+
+
+# ── 统一数据根语义验收（C1/C4，需求 requirements-data-root-semantics.md）──
+
+
+def test_c1_reviews_root_env_is_data_root_then_reviews(monkeypatch, iso_dir):
+    """验收 C1：STOCK_REVIEW_DATA_DIR=数据根 → reviews_root() 返回 {数据根}/reviews；
+    无 env → 默认 {仓库}/data/reviews。"""
+    # env=数据根：reviews_root 不能把 env 当 reviews 根本身，而要拼 /reviews
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(iso_dir))
+    assert reviews_root() == iso_dir / "reviews", \
+        f"env=数据根时 reviews_root() 应等于 {{数据根}}/reviews，实际：{reviews_root()}"
+
+    # 无 env：回落默认 {仓库}/data/reviews（与真实后端一致，behavior 不变）
+    repo = Path(__file__).resolve().parent.parent
+    monkeypatch.delenv("STOCK_REVIEW_DATA_DIR", raising=False)
+    assert reviews_root() == repo / "data" / "reviews", \
+        f"无 env 时 reviews_root() 应等于 {{仓库}}/data/reviews，实际：{reviews_root()}"
+
+
+def test_c4_save_market_data_lands_under_env_reviews(monkeypatch, iso_dir):
+    """验收 C4：env=数据根 → save_market_data 落盘在 root/reviews/{date}/market_data.json
+    （而非 root/{date}/），预热脚本不再把 reviews 产物写到错误位置。"""
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(iso_dir))
+    d = "2026-08-16"
+    payload = {"date": d, "market_data": "# 快照文本"}
+    save_market_data(d, payload)
+
+    expected = iso_dir / "reviews" / d / "market_data.json"
+    assert reviews_root() == iso_dir / "reviews"
+    assert market_data_path(d) == expected
+    assert has_market_data(d)
+    assert expected.is_file(), \
+        f"market_data 应落盘在 {expected}（env=数据根，reviews_root() 拼 /reviews），实际未创建"
+    # 数据根下不应直接出现日期目录（reviews 产物分家到 root/reviews/，体现统一语义）
+    assert not (iso_dir / d).exists(), \
+        f"日期目录不应直接落在数据根下：{iso_dir / d}（统一数据根语义要求归入 root/reviews/）"
+    # 读回一致
+    loaded = load_market_data(d)
+    assert loaded["market_data"] == "# 快照文本"

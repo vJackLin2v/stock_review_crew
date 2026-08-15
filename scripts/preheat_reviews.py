@@ -50,10 +50,11 @@ def _date_arg(value: str) -> date_type:
 
 
 def _reviews_root() -> Path:
-    """复盘根目录：尊重 STOCK_REVIEW_DATA_DIR（与 storage.reviews 同源）。"""
+    """复盘根目录：尊重 STOCK_REVIEW_DATA_DIR（env=数据根，与 storage.reviews 同源，
+    拼 /reviews 才是复盘子目录；2026-08-16 统一语义）。"""
     override = os.environ.get("STOCK_REVIEW_DATA_DIR", "").strip()
     if override:
-        return Path(override)
+        return Path(override) / "reviews"
     return REPO / "data" / "reviews"
 
 

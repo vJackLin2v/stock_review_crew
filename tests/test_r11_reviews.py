@@ -76,11 +76,16 @@ def no_llm_key():
 
 @pytest.fixture()
 def iso_dirs(monkeypatch):
+    """隔离存储目录（统一 env=数据根语义）。
+
+    STOCK_REVIEW_DATA_DIR=base（数据根），reviews_root() 拼 /reviews 即 base/reviews，
+    正好是 tests 期望的 reviews 产物根（iso_dirs["reviews"]）。
+    """
     base = Path(__file__).resolve().parent.parent / ".tmp" / f"r11_test_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     reviews_dir = base / "reviews"
     archive_dir = base / "archive"
     reviews_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(reviews_dir))
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(base))
     monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(archive_dir))
     monkeypatch.setenv("CHATS_DATA_DIR", str(base / "chats"))
     yield {"base": base, "reviews": reviews_dir, "archive": archive_dir}

@@ -159,14 +159,18 @@ def _fake_mode_data(mode: str, date: str) -> dict:
 
 @pytest.fixture()
 def iso_dirs(monkeypatch):
-    """隔离存储目录（自建并清理，沙箱下 pytest tmp_path 不可用）。"""
+    """隔离存储目录（自建并清理，沙箱下 pytest tmp_path 不可用）。
+
+    STOCK_REVIEW_DATA_DIR=数据根（base），reviews_root() 拼 /reviews 落 base/reviews，
+    与 plan/backtests/accounts 等其它存储模块的「数据根+子目录」语义一致。
+    """
     base = Path(__file__).resolve().parent.parent / ".tmp" / f"backend_test_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     reviews_dir = base / "reviews"
     chats_dir = base / "chats"
     archive_dir = base / "archive"
     reviews_dir.mkdir(parents=True, exist_ok=True)
     chats_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(reviews_dir))
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(base))
     monkeypatch.setenv("CHATS_DATA_DIR", str(chats_dir))
     monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(archive_dir))
     yield {"base": base, "reviews": reviews_dir, "chats": chats_dir, "archive": archive_dir}

@@ -130,8 +130,8 @@ def test_infer_mode(imp, time_str, expected):
 
 
 def test_import_basic_structure(imp, fixture_output, iso_dir, monkeypatch):
-    root = iso_dir / "reviews"
-    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(root))
+    root = iso_dir / "reviews"  # reviews 产物根（统一 env=数据根语义下 reviews_root() 返回值）
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(iso_dir))
     monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(iso_dir / "archive"))
     stats = imp.run_import(fixture_output)
 
@@ -170,8 +170,8 @@ def test_import_basic_structure(imp, fixture_output, iso_dir, monkeypatch):
 
 
 def test_import_idempotent_and_force(imp, fixture_output, iso_dir, monkeypatch):
-    root = iso_dir / "reviews"
-    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(root))
+    root = iso_dir / "reviews"  # reviews 产物根（统一 env=数据根语义下 reviews_root() 返回值）
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(iso_dir))
     monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(iso_dir / "archive"))
 
     first = imp.run_import(fixture_output)
@@ -207,8 +207,8 @@ def test_import_idempotent_and_force(imp, fixture_output, iso_dir, monkeypatch):
 
 
 def test_import_dry_run_writes_nothing(imp, fixture_output, iso_dir, monkeypatch):
-    root = iso_dir / "reviews"
-    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(root))
+    root = iso_dir / "reviews"  # reviews 产物根（统一 env=数据根语义下 reviews_root() 返回值）
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(iso_dir))
     monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(iso_dir / "archive"))
     stats = imp.run_import(fixture_output, dry_run=True)
     assert stats["imported"] == 0
@@ -218,8 +218,8 @@ def test_import_dry_run_writes_nothing(imp, fixture_output, iso_dir, monkeypatch
 
 
 def test_import_date_filter(imp, fixture_output, iso_dir, monkeypatch):
-    root = iso_dir / "reviews"
-    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(root))
+    root = iso_dir / "reviews"  # reviews 产物根（统一 env=数据根语义下 reviews_root() 返回值）
+    monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(iso_dir))
     monkeypatch.setenv("STOCK_REVIEW_ARCHIVE_DIR", str(iso_dir / "archive"))
     stats = imp.run_import(fixture_output, date="2026-07-30")
     assert stats["scanned"] == 1

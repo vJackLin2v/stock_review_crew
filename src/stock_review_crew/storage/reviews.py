@@ -59,10 +59,15 @@ _TIME_RE = re.compile(r"^\d{6}(?:-\d+)?$")
 
 
 def reviews_root() -> Path:
-    """复盘存储根目录；环境变量 STOCK_REVIEW_DATA_DIR 可覆盖（测试隔离）。"""
+    """复盘存储根目录；环境变量 STOCK_REVIEW_DATA_DIR 可覆盖（测试隔离）。
+
+    STOCK_REVIEW_DATA_DIR = **数据根**（与 backend/backtest._data_root、
+    accounts/{plan,quotes} 等一致），这里再拼 /reviews 才是复盘子目录；
+    真实后端无 env 时走默认分支。默认分支不变。
+    """
     override = os.environ.get("STOCK_REVIEW_DATA_DIR", "").strip()
     if override:
-        return Path(override)
+        return Path(override) / "reviews"
     return Path(__file__).resolve().parents[3] / "data" / "reviews"
 
 
