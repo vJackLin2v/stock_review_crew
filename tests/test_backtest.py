@@ -260,10 +260,15 @@ def test_backtest_full_done(monkeypatch):
 
     for d in fin["days"]:
         assert d["status"] == "done"
-        assert d["attempts"] == 1 and d["attempt"] == 1
+        # A4 修复后 day.attempts 恒为 MAX_ATTEMPTS(3)；本用例首次即成功，attempt=1
+        assert d["attempts"] == btest.MAX_ATTEMPTS == 3, \
+            f"day.attempts 应恒为 MAX_ATTEMPTS(3)，实际 {d['attempts']}"
+        assert d["attempt"] == 1, "首次即成功 attempt 应为 1"
         assert isinstance(d["elapsed_ms"], int) and d["elapsed_ms"] >= 0
-        # review 阶段耗时
-        assert d["review"]["elapsed_ms"] == 400
+        # review 阶段耗时：现为累计墙钟（含全部尝试与重试等待），非固定 stage 求和 400。
+        # 本用例无重试 → 等于该成功尝试的真实墙钟（mock 极快，约数 ms，无固定上限）；
+        # 稳健断言：非负整数 + 与 day.elapsed_ms 的口径一致（见下方 L286-288）。
+        assert isinstance(d["review"]["elapsed_ms"], int) and d["review"]["elapsed_ms"] >= 0
         # 4 个节点
         assert [s["key"] for s in d["stages"]] == ["fetch", "analysts", "host", "report"]
         for s in d["stages"]:
@@ -283,9 +288,12 @@ def test_backtest_full_done(monkeypatch):
         assert d["settle"]["quotes_missing"] == 0
         assert d["settle"]["elapsed_ms"] >= 0
     assert len(calls) == 3
-    # 每天 elapsed = review(实际耗时) + settle
+    # 每天 elapsed = review(累计墙钟) + settle（A7 口径一致）
     for d in fin["days"]:
+        settle_ms = int(d["settle"]["elapsed_ms"]) if d["settle"] and d["settle"]["elapsed_ms"] is not None else 0
         assert d["elapsed_ms"] >= d["settle"]["elapsed_ms"]
+        assert d["elapsed_ms"] == d["review"]["elapsed_ms"] + settle_ms, \
+            "day.elapsed_ms 应等于 review(累计墙钟) + settle"
 
 
 # ═══════════════════════════════════════════════════════════════

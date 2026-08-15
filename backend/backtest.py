@@ -259,16 +259,40 @@ def _run_one_day(bt: dict, day_index: int) -> None:
 
     last_error = ""
 
-    def _timing_cb(stage: str, pct: float, message: str, meta: Any = None) -> None:
-        # 阶段/分析师事件用于运行中实时更新 current + 落盘（进度可见性）
-        if not (isinstance(meta, dict) and meta.get("type") == "analyst"):
-            bt["current"] = {"date": date_str, "stage": stage}
+    def _update_current(stage: str, message: str, pct: float, node_started_at: float = None,
+                        persist: bool = True) -> None:
+        """运行中实时更新 bt['current']（只读展示数据）。
+
+        analyst 事件高频，只更新内存不落盘（_persist=False）；阶段切换照常更新+落盘。
+        node_started_at 为内部实时计时字段，仅在 GET 时计算 elapsed_ms，不用持久化对外。
+        """
+        if node_started_at is None:
+            node_started_at = time.monotonic()
+        bt["current"] = {
+            "date": date_str,
+            "stage": stage,
+            "message": message,
+            "pct": pct,
+            "attempt": attempt,
+            "attempts": MAX_ATTEMPTS,
+            "last_error": last_error or None,
+            "node_started_at": node_started_at,
+        }
+        if persist:
             _persist(bt)
 
+    def _timing_cb(stage: str, pct: float, message: str, meta: Any = None) -> None:
+        # 阶段/分析师事件都更新内存 current（需求回测实时诊断）；analyst 高频不落盘
+        is_analyst = isinstance(meta, dict) and meta.get("type") == "analyst"
+        _update_current(stage, message or "", pct, persist=not is_analyst)
+
+    # 当天 review 累计耗时：所有尝试（含失败与重试间隔）都计入，避免重试过的天被低估
+    review_total_ms = 0
     for attempt in range(1, MAX_ATTEMPTS + 1):
         day["attempt"] = attempt
-        day["attempts"] = attempt
-        _persist(bt)
+        # 修复 bug：attempts 应为固定上限 MAX_ATTEMPTS（3），原错写成 attempt 当前次数
+        day["attempts"] = MAX_ATTEMPTS
+        _update_current("review", "", 0.0, persist=True)
         _t1 = time.monotonic()
         try:
             result = _run_review_day_impl(
@@ -279,8 +303,13 @@ def _run_one_day(bt: dict, day_index: int) -> None:
         except Exception as exc:  # noqa: BLE001 - DataValidationError 等一律按单日失败处理
             logger.warning("[backtest] %s 第 %d 次失败：%s", date_str, attempt, exc)
             last_error = str(exc)
+            # 本次尝试耗时计入累计（失败不算命中）
+            review_total_ms += int((time.monotonic() - _t1) * 1000)
             if attempt < MAX_ATTEMPTS:
+                _update_current("review", "失败准备重试", 0.0, persist=True)
+                # 重试间隔等待也计入当天统计时间
                 time.sleep(RETRY_SLEEP)
+                review_total_ms += int(RETRY_SLEEP * 1000)
             continue
         review_ms = int((time.monotonic() - _t1) * 1000)
         # 校验产物（对齐 review_batch 口径）；不合格删记录重跑
@@ -294,28 +323,44 @@ def _run_one_day(bt: dict, day_index: int) -> None:
                 reviews_store.delete_review(date_str)
             except Exception:  # noqa: BLE001
                 pass
+            # 本次尝试耗时计入累计（产物不合格也算一次失败尝试）
+            review_total_ms += review_ms
             if attempt < MAX_ATTEMPTS:
+                _update_current("review", last_error, 0.0, persist=True)
+                # 重试间隔等待也计入当天统计时间
                 time.sleep(RETRY_SLEEP)
+                review_total_ms += int(RETRY_SLEEP * 1000)
                 continue
             break
 
-        # 成功：结算当天总耗时 = settle + review
+        # 成功：本次尝试耗时计入累计，当天 review 总耗时 = 各次尝试（含失败/重试）之和
+        review_total_ms += review_ms
         day["status"] = "done"
-        day["elapsed_ms"] = review_ms + int(settle_result.get("elapsed_ms") or 0)
-        day["review"] = {"elapsed_ms": _total_stage_ms(result.get("stage_timings"))}
+        day["elapsed_ms"] = review_total_ms + int(settle_result.get("elapsed_ms") or 0)
+        day["review"] = {"elapsed_ms": review_total_ms}
         day["stages"] = _build_stages(result)
         # 记录分析师耗时（overwrite day.stages[analysts].analysts）
         _fill_analyst_gauge(day, result.get("analyst_timings") or {})
         last_error = ""
+        bt["current"] = None
         break
 
     if day["status"] == "running":
         day["status"] = "failed"
         day["error"] = last_error or "单日复盘失败"
+        # fail-fast：累计全部尝试耗时（含失败与重试间隔），前端折线/明细不再低估
+        day["elapsed_ms"] = review_total_ms + int(settle_result.get("elapsed_ms") or 0)
+        day["review"] = {"elapsed_ms": review_total_ms}
         bt["status"] = "error"
         bt["finished_at"] = datetime.now().isoformat(timespec="seconds")
         bt["total_elapsed_ms"] = _total_run_ms(bt)
-        bt["current"] = {"date": date_str, "stage": "error"}
+        bt["current"] = {
+            "date": date_str, "stage": "error", "message": day["error"],
+            "pct": 0.0, "attempt": attempt, "attempts": MAX_ATTEMPTS,
+            "last_error": last_error or None,
+            # 终态无节点已耗时（GET 不计算 elapsed_ms，前端显示「—」）
+            "node_started_at": None,
+        }
         _persist_day_and_meta(bt)
         raise _BacktestStopped(day["error"], bt)
 
@@ -497,14 +542,43 @@ def get_backtest(bt_id: str) -> dict:
     p = _run_dir(bt_id) / "progress.json"
     if p.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(p.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             pass
+        else:
+            # 文件重建态：剔除内部实时计时字段 node_started_at（旧进程 monotonic 无意义，
+            # 不对外泄漏；文件态无实时 elapsed_ms，前端显示「—」）
+            cur = data.get("current") if isinstance(data, dict) else None
+            if isinstance(cur, dict):
+                cur.pop("node_started_at", None)
+            return data
     raise HTTPException(status_code=404, detail="回测不存在")
 
 
+def _apply_live_elapsed(public: dict) -> None:
+    """对内存态回测的公开对象实时计算 current.elapsed_ms（毫秒）。
+
+    仅当 current 存在且含内部计时字段 node_started_at 时计算并剔除此内部字段
+    （不污染内存态）。文件重建态（重启后查历史）无实时值 → 原样返回，elapsed_ms 缺失。
+    """
+    cur = public.get("current")
+    if not isinstance(cur, dict):
+        return
+    nsa = cur.get("node_started_at")
+    if isinstance(nsa, (int, float)):
+        cur["elapsed_ms"] = int((time.monotonic() - nsa) * 1000) if nsa >= 0 else 0
+    cur.pop("node_started_at", None)
+
+
 def _public(bt: dict) -> dict:
-    return {k: bt[k] for k in bt if not k.startswith("_")}
+    """内存态回测 → 公开字段浅拷贝；current 独立拷贝并附实时 elapsed_ms。"""
+    public = {k: bt[k] for k in bt if not k.startswith("_")}
+    cur = public.get("current")
+    if isinstance(cur, dict):
+        # 独立拷贝，确保内部计时字段/实时 elapsed 只加到返回对象，不污染内存态
+        public["current"] = dict(cur)
+    _apply_live_elapsed(public)
+    return public
 
 
 def list_backtests(limit: int = 20) -> list[dict]:

@@ -2652,6 +2652,61 @@ html[data-font="xlarge"] body { font-size: 17px; }
   margin-top: 10px;
 }
 .bt-progress-meta b { color: var(--text); }
+
+/* 回测实时诊断：节点耗时 / 尝试徽标 / 上次失败警示 / 节点消息 */
+.bt-node-elapsed { font-variant-numeric: tabular-nums; color: var(--text); }
+.bt-node-msg-top { color: var(--text-2); }
+.bt-node-msg-top b { color: var(--text-2); font-weight: 600; }
+.bt-attempt-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 9px;
+  border-radius: 99px;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.7;
+  background: rgba(240, 145, 18, 0.14);
+  color: #d97a06;
+  white-space: nowrap;
+}
+.bt-last-error-warning {
+  flex-basis: 100%;
+  width: 100%;
+  margin: 2px 0 0;
+  padding: 7px 11px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  background: rgba(240, 196, 20, 0.14);
+  border: 1px solid rgba(240, 196, 20, 0.35);
+  color: #8a6d0b;
+  word-break: break-word;
+}
+.bt-last-error-warning b { color: #7a5f00; }
+.bt-node-info { display: inline-flex; align-items: center; gap: 8px; overflow: hidden; }
+.bt-node-stage {
+  font-weight: 700;
+  color: #5c7cfa;
+  background: rgba(92, 124, 250, 0.12);
+  border-radius: 6px;
+  padding: 1px 7px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.bt-node-msg { font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.bt-node-elapsed { font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.bt-retry-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 9px;
+  border-radius: 99px;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.7;
+  white-space: nowrap;
+  background: rgba(12, 166, 120, 0.12);
+  color: var(--down);
+}
 .bt-section-title {
   font-size: 13px;
   font-weight: 700;
