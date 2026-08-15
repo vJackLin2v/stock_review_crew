@@ -480,6 +480,9 @@ def test_run_review_day_direct_returns_timing(fake_fetch):
     assert set(res["stage_timings"].keys()) >= {"fetch", "analysts", "host", "report"}
     for v in res["stage_timings"].values():
         assert v.get("elapsed_ms") is not None and v["elapsed_ms"] >= 0
+    # 2026-08-16 修复：analysts 节点必须 > 0（此前分析师执行时间被误算进 fetch，
+    # analysts 结算为 0ms）——分析师执行是并行多秒级，mock 环境也必然 > 0
+    assert res["stage_timings"].get("analysts", {}).get("elapsed_ms", 0) > 0
     # 分析师粒度耗时（引擎分析师线程 copy_context 后经 _emit meta 事件上报）
     at = res["analyst_timings"]
     assert set(at.keys()) == {s[0] for s in SKILLS}

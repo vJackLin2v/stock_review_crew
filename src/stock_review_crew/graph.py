@@ -1306,6 +1306,12 @@ def _run_analysts(state):
         return []
     _ANALYST_TIMEOUT = 300.0  # R12 修复：单批分析师整体超时，超时者降级为规则引擎
 
+    # 2026-08-16（回测耗时采集修复）：分析师执行开始前发「analysts」阶段事件——
+    # 让耗时采集器在分析师真正开始时切到 analysts 阶段并开始计时；否则阶段切换
+    # 只在分析师全部完成后才发生，分析师执行时间会被误算进上一阶段（fetch 虚高、
+    # analysts=0ms）。正常复盘/前端阶段序列不受影响（仍是 fetch→analysts→…）。
+    _emit("analysts", 20, "分析师开始（并行）")
+
     def _group_of(skill):
         return "trend" if skill.get("group") in ("trend", "both") else "sentiment"
 

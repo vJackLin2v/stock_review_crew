@@ -210,7 +210,17 @@ def save_review(
 
     root = _ensure_root()
     date_dir = root / date
+    # 2026-08-15：离线回放预热缓存（market_data.json）不属于复盘产物，覆盖旧目录时
+    # 必须保留（挪出→重建→放回），否则预热缓存被归档/删除，重跑历史复盘又回实时取数。
+    _md_backup: Optional[Path] = None
     if date_dir.is_dir():
+        md_path = date_dir / _MARKET_DATA_FILENAME
+        if md_path.is_file():
+            try:
+                _md_backup = date_dir.with_name(f".{date}.md_tmp")
+                shutil.copy2(md_path, _md_backup)
+            except Exception:  # noqa: BLE001 - 备份失败不阻塞（最坏缓存丢失）
+                _md_backup = None
         # R4：覆盖前归档旧版完整目录（新结构单份或旧结构多份均可归档），失败不阻塞
         archived = _archive_date_dir(date_dir, meta)
         if archived:
@@ -220,6 +230,15 @@ def save_review(
         except Exception:  # noqa: BLE001
             pass
     date_dir.mkdir(parents=True, exist_ok=True)
+    if _md_backup is not None and _md_backup.exists():
+        try:
+            shutil.copy2(_md_backup, date_dir / _MARKET_DATA_FILENAME)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _md_backup.unlink()
+        except Exception:  # noqa: BLE001
+            pass
 
     if isinstance(report, str):
         report_data = {"final_report": report}
