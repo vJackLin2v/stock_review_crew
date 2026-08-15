@@ -244,6 +244,17 @@ function DayRow({ day, isCurrent, liveCurrent, liveNodeElapsed }) {
   const reviewMs = num(day.review && day.review.elapsed_ms, NaN);
   const attemptN = num(day.attempt, NaN);
   const attemptsN = num(day.attempts, NaN);
+  // 重试次数：优先 attempts_log 失败条数（真实重试）；旧数据（无 attempts_log）用
+  // day.attempt（旧语义=最后尝试次数）兜底。切勿用 attempts（上限，恒 3）判断——
+  // 会导致没重试的天也显示「重试 2 次」。
+  const attemptsLog = Array.isArray(day.attempts_log) ? day.attempts_log : [];
+  const failCount = attemptsLog.filter((a) => a && a.ok === false).length;
+  const retryCount =
+    failCount > 0
+      ? failCount
+      : attemptsLog.length === 0 && Number.isFinite(attemptN) && attemptN > 1
+        ? attemptN - 1
+        : 0;
   const hasDetail =
     Number.isFinite(reviewMs) ||
     (Array.isArray(day.stages) && day.stages.length > 0);
@@ -284,8 +295,8 @@ function DayRow({ day, isCurrent, liveCurrent, liveNodeElapsed }) {
               {cur.message ? <span className="bt-node-msg">{cur.message}</span> : null}
               <span className="bt-node-elapsed">已耗时 {fmtMS(liveNodeElapsed)}</span>
             </span>
-          ) : status === "done" && Number.isFinite(attemptsN) && attemptsN > 1 ? (
-            <span className="bt-retry-badge" title="经历过失败重试">重试 {attemptsN - 1} 次</span>
+          ) : status === "done" && retryCount > 0 ? (
+            <span className="bt-retry-badge" title="经历过失败重试">重试 {retryCount} 次</span>
           ) : day.error ? (
             <span className="bt-fail-reason">
               {Number.isFinite(attemptN) && Number.isFinite(attemptsN) && attemptsN > 1
