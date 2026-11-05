@@ -37,7 +37,7 @@ def test_r1_sector_name_kept():
 
 def test_r2_single_analyst_node():
     """图结构断言：build_graph 后节点集合含 analysts，不含 trend_analysts/sentiment_analysts；
-    job 契约：analysts_total=5、analysts_done 单调到 5。"""
+    job 契约：analysts_total=6、analysts_done 单调到 5。"""
     import stock_review_crew.graph as graph
 
     compiled = graph.build_graph()

@@ -24,9 +24,9 @@ def test_min_buy_unit(code, expected):
 
 @pytest.mark.parametrize("qty,code,expected", [
     (150, "688001", 0),      # 科创板不足 200 股 → 0（拒绝）
-    (250, "688001", 200),    # 科创板 250 → 200（2 手）
-    (350, "688001", 300),    # 科创板 350 → 300（3 手）
-    (550, "688001", 500),    # 科创板 550 → 500
+    (250, "688001", 250),    # 科创板 200 股起、1 股递增
+    (350, "688001", 350),
+    (550, "688001", 550),
     (150, "600000", 100),    # 主板 150 → 100
     (250, "600000", 200),    # 主板 250 → 200
     (99, "600000", 0),       # 主板不足 100 → 0
@@ -36,7 +36,7 @@ def test_round_lot_buy(qty, code, expected):
 
 
 @pytest.mark.parametrize("qty,code,expected", [
-    (350, "688001", 300),   # 卖出按 100 递增
+    (350, "688001", 350),   # 科创板 1 股递增（非 100 股强制）
     (50, "688001", 50),     # 零股允许一次性卖出
     (250, "600000", 200),
     (30, "600000", 30),     # 零股卖出
@@ -75,11 +75,10 @@ def test_buy_kechuang_min_200():
     acct = acct_engine.open_account("test_kechuang")
     acct["trades"] = []
     day = {"date": "2026-08-07", "pre_close": 10.0, "high": 10.5, "low": 9.8, "close": 10.2}
-    # 1 成仓位（1 万）买 10 元科创板 → 1000 股 → 取 100 股整数倍 = 1000（≥200）
+    # 1 成仓位（1 万）买 10 元科创板 → 约 999 股（200 股起、1 股递增）
     r = acct_engine.place_order(acct, "688001", "科创", "buy", 10.0, 1, day)
     assert r.ok, r.reason
     assert r.trade["qty"] >= 200
-    assert r.trade["qty"] % 100 == 0
 
 
 def test_sell_more_than_position_rejected():
@@ -93,10 +92,13 @@ def test_sell_more_than_position_rejected():
     r2 = acct_engine.place_order(acct, "600000", "主板测试", "sell", 12.0, 8, day)
     assert r2.ok, r2.reason
     assert r2.trade["qty"] == 100
-    # 剩余 100 股，5 成=50 → 零股可卖 50
+    # 剩余 100 股，5 成=50 → 非 100 股整数倍，拒绝（A股规则）
     r3 = acct_engine.place_order(acct, "600000", "主板测试", "sell", 12.0, 5, day)
-    assert r3.ok, r3.reason
-    assert r3.trade["qty"] == 50
+    assert not r3.ok
+    # 10 成=100 → 全部卖出（零股一次性）
+    r4 = acct_engine.place_order(acct, "600000", "主板测试", "sell", 12.0, 10, day)
+    assert r4.ok, r4.reason
+    assert r4.trade["qty"] == 100
 
 
 def test_sell_no_position_rejected():

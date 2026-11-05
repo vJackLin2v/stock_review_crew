@@ -619,6 +619,8 @@ def _records_from_tx_kline(symbol: str) -> list[dict]:
         params={"param": f"{sym},day,,,320,qfq"},
         headers={"User-Agent": _UA},
         timeout=15,
+        # 本机代理可能未启动；腾讯接口直连更稳定，避免被失效代理拖垮
+        proxies={"http": None, "https": None},
     )
     resp.raise_for_status()
     data = (resp.json().get("data") or {}).get(sym) or {}
@@ -953,6 +955,7 @@ def _zt_pool_from_tushare(date: str) -> dict:
 
 
 _ts_name_cache: dict = {}
+_ts_list_date_cache: dict = {}
 
 
 def _ts_name_map() -> dict:
@@ -960,9 +963,17 @@ def _ts_name_map() -> dict:
         try:
             df = _ts_stock_basic()
             _ts_name_cache.update(dict(zip(df["ts_code"].astype(str), df["name"])))
+            _ts_list_date_cache.update(dict(zip(df["ts_code"].astype(str),
+                                                df["list_date"].astype(str))))
         except Exception:
             return {}
     return _ts_name_cache
+
+
+def _ts_list_date_map() -> dict:
+    if not _ts_name_cache:
+        _ts_name_map()
+    return _ts_list_date_cache
 
 
 def _zt_pool_from_ths(date: str) -> dict:
@@ -1075,6 +1086,18 @@ def _breadth_from_tushare(date: str) -> dict:
     is_gem = codes.str.startswith(("30", "68"))
     dist = {
         "涨停": len(sealed), "跌停": len(dieting),
+          # 细分区间的全市场涨跌分布（2026-08-17 新增，供市场天气按区间数量评分）
+          "涨0%-3%": int(((pct > 0) & (pct < 0.03)).sum()),
+          "涨3%-5%": int(((pct >= 0.03) & (pct < 0.05)).sum()),
+          "涨5%-7%": int(((pct >= 0.05) & (pct < 0.07)).sum()),
+          "涨7%-10%": int(((pct >= 0.07) & (pct < 0.10)).sum()),
+          "涨10%以上": int((pct >= 0.10).sum()),
+          "跌0%-3%": int(((pct < 0) & (pct > -0.03)).sum()),
+          "跌3%-5%": int(((pct <= -0.03) & (pct > -0.05)).sum()),
+          "跌5%-7%": int(((pct <= -0.05) & (pct > -0.07)).sum()),
+          "跌7%-10%": int(((pct <= -0.07) & (pct > -0.10)).sum()),
+          "跌10%以上": int((pct <= -0.10).sum()),
+
         "涨5%-10%": int(((pct >= 0.05) & (pct < 0.0995) & ~is_gem).sum()
                         + ((pct >= 0.10) & (pct < 0.1995) & is_gem).sum()),
         "涨2%-5%": int(((pct >= 0.02) & (pct < 0.05)).sum()),
@@ -1684,6 +1707,8 @@ def _minute_bars_from_tx(symbol: str, date: str, period: int,
         params={"code": sym},
         headers={"User-Agent": _UA},
         timeout=15,
+        # 同腾讯日K，直连避免失效代理
+        proxies={"http": None, "https": None},
     )
     resp.raise_for_status()
     data = ((resp.json().get("data") or {}).get(sym) or {}).get("data") or {}
@@ -2320,7 +2345,11 @@ def _stock_info_from_tushare(code: str, date: str) -> dict:
     if df is None or df.empty:
         raise DataSourceError(f"未找到 {ts_code} 的数据（可能代码错误或非交易日）")
     df = df.sort_values("trade_date")
-    latest = df.iloc[-1]
+    # 必须精确取 date 当日行，禁止用“截至 date 的最后一行”冒充当日行情
+    hit = df[df["trade_date"] == fmt]
+    if hit.empty:
+        raise DataSourceError(f"{ts_code} {date} 当日无日线（可能非交易或数据未更新）")
+    latest = hit.iloc[0]
     closes = [float(c) for c in df["close"].tolist()]
     ma5 = round(sum(closes[-5:]) / 5, 4) if len(closes) >= 5 else None
     ma10 = round(sum(closes[-10:]) / 10, 4) if len(closes) >= 10 else None
@@ -2338,7 +2367,8 @@ def _stock_info_from_tushare(code: str, date: str) -> dict:
             {"date": _dash(str(r["trade_date"])), "close": float(r["close"]),
              "pct_change": round(float(r["pct_chg"]) / 100.0, 6)}
             for _, r in df.tail(5).iterrows()],
-        "source": "Tushare", "degraded": False, "degraded_reason": [], "note": None,
+        "list_date": _ts_list_date_map().get(ts_code),
+          "source": "Tushare", "degraded": False, "degraded_reason": [], "note": None,
     }
 
 
@@ -2354,7 +2384,10 @@ def _stock_info_from_em(code: str, date: str) -> dict:
     if df is None or df.empty:
         raise DataSourceError(f"东财未找到 {code} 的数据")
     df = df.sort_values("日期")
-    latest = df.iloc[-1]
+    hit = df[df["日期"].astype(str).str.replace("-", "") == fmt]
+    if hit.empty:
+        raise DataSourceError(f"东财 {code} {date} 当日无日线（可能非交易或数据未更新）")
+    latest = hit.iloc[0]
     closes = [float(c) for c in df["收盘"].tolist()]
     ma5 = round(sum(closes[-5:]) / 5, 4) if len(closes) >= 5 else None
     ma10 = round(sum(closes[-10:]) / 10, 4) if len(closes) >= 10 else None

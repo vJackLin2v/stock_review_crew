@@ -233,7 +233,7 @@ def test_status_done_job_no_pending(iso_dirs, monkeypatch):
     with bm._lock:
         bm.JOBS["r11_done_job"] = {
             "job_id": "r11_done_job", "status": "done", "stage": "done", "pct": 100,
-            "message": "完成", "analysts_done": 5, "analysts_total": 5,
+            "message": "完成", "analysts_done": 6, "analysts_total": 6,
             "result": None, "error": None, "_created": 0.0, "_finished": 1.0, "_date": "2026-08-03",
         }
     try:

@@ -3,6 +3,7 @@ import DataTab from "./DataTab";
 import ReviewTab from "./ReviewTab";
 import ChatTab from "./ChatTab";
 import TradesTab from "./TradesTab";
+import ZTReviewTab from "./ZTReviewTab";
 
 // R11-R1：首页重构为 4 个 Tab（数据展示 | 当日复盘 | 分析师聊天 | 交割单分析）
 // - 默认首个 Tab = 数据展示
@@ -11,6 +12,7 @@ import TradesTab from "./TradesTab";
 const TABS = [
   { key: "data", label: "数据展示" },
   { key: "review", label: "当日复盘" },
+  { key: "zt", label: "涨停复盘" },
   { key: "chat", label: "分析师聊天" },
   { key: "trades", label: "交割单分析" },
 ];
@@ -76,6 +78,13 @@ export default function HomeView({
             onRetryHistory={onRetryHistory}
             onDeleteReview={onDeleteReview}
           />
+        </div>
+        <div
+          role="tabpanel"
+          className={`home-tab-panel${homeTab === "zt" ? " active" : ""}`}
+          aria-hidden={homeTab !== "zt"}
+        >
+          <ZTReviewTab />
         </div>
         <div
           role="tabpanel"

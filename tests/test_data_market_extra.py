@@ -363,7 +363,7 @@ def test_extra_indices_ok(monkeypatch):
     monkeypatch.setattr(market_extra, "_extra_index_item", lambda d: (sample, "通达信协议"))
     out = market_extra.fetch_extra_indices()
     assert out["degraded"] is False
-    assert len(out["items"]) == 3
+    assert len(out["items"]) == 4
     assert out["items"][0]["close"] == 27.08
 
 
@@ -378,7 +378,7 @@ def test_extra_indices_partial_fail(monkeypatch):
     out = market_extra.fetch_extra_indices()
     assert out["degraded"] is True
     missing = [i for i in out["items"] if i["close"] is None]
-    assert len(missing) == 2
+    assert len(missing) == 3
     ok = [i for i in out["items"] if i["close"] is not None]
     assert len(ok) == 1 and ok[0]["code"] == "880003"
 
@@ -408,7 +408,7 @@ def test_extra_indices_bk_fail_reason_zh(monkeypatch):
     assert out["degraded"] is True
     assert all(i["close"] is None for i in out["items"])
     for reason in out["degraded_reason"]:
-        assert "微盘股" in reason or "高股息股" in reason or "平均股价" in reason
+        assert "微盘股" in reason or "高股息股" in reason or "平均股价" in reason or "同花顺全A" in reason
         # 英文异常特征必须为零
         for eng in ("time data", "does not match", "Traceback", "Bad Gateway",
                     "Server Error", "url:", "HTTPError", "ValueError"):
@@ -439,7 +439,7 @@ def test_em_http_json_zh_error(monkeypatch):
 # ── F4 风格坐标 ──
 
 def test_style_quad_ok(monkeypatch):
-    """2026-08-07 细分：score 灵敏度 ×200，label 按差值分档（≥1.5pp 明显占优）。"""
+    """2026-08-07 细分：score 灵敏度 ×1000，label 按差值分档（≥1.5pp 明显占优）。"""
     monkeypatch.setattr(market_extra, "_style_index_pct",
                         lambda code, tx, name: 0.08 if code == "000300" else -0.03)
     monkeypatch.setattr(market_extra, "_style_board_pct",
@@ -447,10 +447,10 @@ def test_style_quad_ok(monkeypatch):
     out = market_extra.fetch_style_quad()
     assert out["degraded"] is False
     lv = out["large_vs_small"]
-    assert lv["score"] == 72  # 50 + (0.08+0.03)*200
+    assert lv["score"] == 100  # 50 + (0.08+0.03)*1000
     assert lv["label"] == "大盘明显占优"  # 差 11pp ≥1.5pp
     vg = out["value_vs_growth"]
-    assert vg["score"] == 64  # 50 + (0.05+0.02)*200
+    assert vg["score"] == 100  # 50 + (0.05+0.02)*1000
     assert vg["label"] == "价值明显占优"  # 差 7pp ≥1.5pp
 
 
@@ -470,7 +470,7 @@ def test_style_quad_label_fine_grained(monkeypatch):
                         lambda name, secid: (-0.0073, False) if "红利" in name else (0.013, False))
     out2 = market_extra.fetch_style_quad()
     assert out2["value_vs_growth"]["label"] == "成长明显占优"
-    assert out2["value_vs_growth"]["score"] == 46  # 50 + (-0.0073-0.013)*200 ≈ 46
+    assert out2["value_vs_growth"]["score"] == 30  # 50 + (-0.0073-0.013)*1000 ≈ 30
 
 
 def test_style_quad_dim_missing(monkeypatch):

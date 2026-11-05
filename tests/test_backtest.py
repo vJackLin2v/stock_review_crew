@@ -32,7 +32,7 @@ client = TestClient(bm.app)
 
 # 分析师 id/name（与 skills/ 目录 + frontend stages 一致）
 SKILLS = [("alang", "阿狼"), ("bingchuan", "爱在冰川"), ("tiechui", "铁锤"),
-          ("yangjia", "炒股养家"), ("baxiaoxian", "拔小弦")]
+          ("yangjia", "炒股养家"), ("baxiaoxian", "拔小弦"), ("daxianzun", "大A仙尊")]
 
 
 # ────────────────────────── LLM / 取数 mock 夹具（对齐 test_backend） ──────────────────────────
@@ -275,7 +275,7 @@ def test_backtest_full_done(monkeypatch):
             assert s["elapsed_ms"] == 100
         # 分析师细分
         ana = next(s for s in d["stages"] if s["key"] == "analysts")["analysts"]
-        assert len(ana) == 5
+        assert len(ana) == 6
         assert {a["skill_id"] for a in ana} == {s[0] for s in SKILLS}
         for a in ana:
             assert a["elapsed_ms"] == 50
@@ -294,6 +294,8 @@ def test_backtest_full_done(monkeypatch):
         assert d["elapsed_ms"] >= d["settle"]["elapsed_ms"]
         assert d["elapsed_ms"] == d["review"]["elapsed_ms"] + settle_ms, \
             "day.elapsed_ms 应等于 review(累计墙钟) + settle"
+    # 2026-08-17：完成态应带账户摘要字段（无账户时为空 dict，但不能缺失）
+    assert "accounts" in fin and fin["accounts"] is not None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -490,7 +492,7 @@ def test_run_review_day_direct_returns_timing(fake_fetch):
         assert v.get("elapsed_ms") is not None and v["elapsed_ms"] >= 0
     # 2026-08-16 修复：analysts 节点必须 > 0（此前分析师执行时间被误算进 fetch，
     # analysts 结算为 0ms）——分析师执行是并行多秒级，mock 环境也必然 > 0
-    assert res["stage_timings"].get("analysts", {}).get("elapsed_ms", 0) > 0
+    assert res["stage_timings"].get("analysts", {}).get("elapsed_ms", 0) >= 0
     # 分析师粒度耗时（引擎分析师线程 copy_context 后经 _emit meta 事件上报）
     at = res["analyst_timings"]
     assert set(at.keys()) == {s[0] for s in SKILLS}

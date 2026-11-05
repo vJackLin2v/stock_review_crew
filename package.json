@@ -1,0 +1,17 @@
+{
+  "name": "stock-review-crew",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A股多智能体复盘系统：根目录 npm 脚本代理到 frontend",
+  "scripts": {
+    "install": "npm --prefix frontend install",
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "preview": "npm --prefix frontend run preview",
+    "verify:normalize": "npm --prefix frontend run verify:normalize",
+    "install:frontend": "npm --prefix frontend install"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

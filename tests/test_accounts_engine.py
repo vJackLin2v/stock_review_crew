@@ -18,8 +18,8 @@ from stock_review_crew.accounts.engine import (
 )
 
 
-def _day(pre_close=10.0, high=10.8, low=10.0, close=10.5, date="2026-07-15"):
-    return {"date": date, "pre_close": pre_close, "high": high, "low": low, "close": close}
+def _day(pre_close=10.0, high=10.8, low=10.0, close=10.5, date="2026-07-15", open=None):
+    return {"date": date, "pre_close": pre_close, "open": open, "high": high, "low": low, "close": close}
 
 
 def test_open_account_initial():
@@ -217,16 +217,16 @@ def test_buy_kechuang_insufficient_cash_keeps_min_unit():
 
 
 def test_buy_kechuang_decrement_floor_at_min_unit():
-    """2026-08-13 边界修复（递减下限）：预算先算出 300 股但资金只够 200 股
+    """2026-08-13 边界修复（递减下限）：预算先算出 300 股但资金只够 299 股
     （现金 4505、价格 15.00：raw=300 → 300 股总成本 4505.045 > 现金）时，
-    逐手递减应停在 200（不低于下限），而不是一步减到 100。"""
+    科创板按 1 股递增规则逐股递减到 299（不低于下限），而不是一步减到 100。"""
     day = {"date": "2026-08-07", "pre_close": 15.0, "high": 15.5, "low": 14.8, "close": 15.2}
     acct = open_account("kechuang_floor")
     acct["trades"] = []
     acct["cash"] = 4505.0
     r = place_order(acct, "688001", "科创板测试", "buy", 15.0, 10, day)
     assert r.ok, r.reason
-    assert r.trade["qty"] == 200
+    assert r.trade["qty"] == 299
     assert r.trade["qty"] >= 200
 
 
@@ -274,16 +274,20 @@ def test_g3_sell_target_below_low_fills():
     assert "600519" not in acct["positions"]  # 全卖清仓
 
 
-def test_g4_sell_target_above_high_rejected():
-    """G4：卖出 target>high（当日现价低于目标价，等反弹）→ 拒绝，reason 含「未触及」。"""
+def test_g4_sell_target_above_high_fills_at_open():
+    """G4（2026-08-16 二次修正）：卖出 target>high（当日没等到目标价）→ 按开盘价成交，
+    不再拒绝。成交价=开盘价；trade.target_price 保留原目标价。"""
     acct = open_account("alang")
     b = place_order(acct, "600519", "x", "buy", 10.00, 3, _day())
     assert b.ok, b.reason
     r = place_order(acct, "600519", "x", "sell", 10.00, 10,
-                    _day(date="2026-07-16", pre_close=10.5, high=9.8, low=9.5, close=9.7))
-    assert not r.ok and "未触及" in r.reason
-    # 拒绝不影响已有持仓
-    assert acct["positions"]["600519"]["qty"] == 2900
+                    _day(date="2026-07-16", pre_close=10.5, open=9.6,
+                         high=9.8, low=9.5, close=9.7))
+    assert r.ok, r.reason
+    assert r.trade["target_price"] == 10.00
+    assert r.trade["price"] == pytest.approx(9.60)
+    assert r.trade["qty"] == 2900
+    assert "600519" not in acct["positions"]  # 开盘触发卖出后清仓
 
 
 # G2（买入 target<low 拒）回归：test_buy_reject_target_not_touched（_day(low=10.10)）

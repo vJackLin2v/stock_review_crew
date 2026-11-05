@@ -43,7 +43,9 @@ from backend import jobs  # noqa: E402  # JOBS 状态 + 任务执行（拆分自
 from backend import routes_backtest  # noqa: E402  # 回测编排路由（回测）
 from backend import routes_chat  # noqa: E402  # 聊天路由（拆分自 main）
 from backend import routes_data  # noqa: E402  # 行情/名称/自选路由（拆分自 main）
+from backend import routes_anomaly  # noqa: E402  # 监管异动（2026-08-17）
 from backend import routes_review  # noqa: E402  # 复盘/任务轮询路由（拆分自 main）
+from backend import settings_routes  # noqa: E402  # 模拟交易设置路由（初始资金）
 from backend import snapshot  # noqa: E402  # 快照转换（拆分自 main）
 from backend import trades_routes  # noqa: E402  # R11-R1 交割单分析路由（T4）
 
@@ -125,6 +127,10 @@ app.include_router(routes_review.router)  # 复盘：POST /api/reviews、GET /ap
 app.include_router(routes_backtest.router)  # 回测：POST /api/backtest/start、GET /api/backtest/*
 app.include_router(routes_chat.router)  # 聊天：POST/GET/DELETE /api/chat/sessions[...]
 app.include_router(routes_data.router)  # 行情数据：/api/data/*、/api/watchlist
+from backend import routes_zt  # noqa: E402  # 涨停复盘工作台：/api/data/zt-tracking/*
+app.include_router(routes_zt.router)  # 涨停复盘工作台（手动采集/数据包/人工标记）
+app.include_router(routes_anomaly.router)  # 监管异动：/api/anomaly/*
+app.include_router(settings_routes.router)  # 模拟交易设置：/api/settings/accounts
 _flatten_included_routers(app)
 app.add_middleware(
     CORSMiddleware,

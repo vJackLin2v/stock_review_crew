@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import * as api from "../api";
 import MarkdownView from "./MarkdownView";
 import { IndexMinuteChart, LimitLadderChart, SectorChart, SentimentChart, SentimentKpis } from "./Charts";
 import { fmtDate, fmtDateTime, fmtTimeHM } from "../format";
@@ -95,6 +96,18 @@ export default function ReportView({ report, offline, history, onSwitchReview })
     .filter(Boolean)
     .join("；") || undefined;
 
+  const [skillPrompts, setSkillPrompts] = useState({});
+  useEffect(() => {
+    api.getSkills()
+      .then((res) => {
+        const list = res && res.skills ? res.skills : Array.isArray(res) ? res : [];
+        const m = {};
+        (list || []).forEach((sk) => { if (sk && sk.id) m[sk.id] = sk.prompt || ""; });
+        setSkillPrompts(m);
+      })
+      .catch(() => {});
+  }, []);
+
   const reportCard = (
     <div className="card">
       <div className="card-head-row">
@@ -179,17 +192,7 @@ export default function ReportView({ report, offline, history, onSwitchReview })
         </div>
       </div>
 
-      {/* 改动1：左侧菜单只显示「{date} 复盘」单一标题（不再逐条列出章节标题；
-          章节锚点跳转入口移除，保留「返回顶部」） */}
-      <div className="report-layout">
-        <aside className="report-toc report-toc-sticky" aria-label="报告目录">
-          <span className="report-toc-title">{tocTitle}</span>
-          <button type="button" className="btn btn-outline btn-sm report-toc-top" onClick={scrollToTop}>
-            ↑ 返回顶部
-          </button>
-        </aside>
         {reportCard}
-      </div>
 
       <div className="card">
         <h3 className="card-title">{analyses.length ? `${analyses.length} 位分析师点评` : "分析师点评"}</h3>

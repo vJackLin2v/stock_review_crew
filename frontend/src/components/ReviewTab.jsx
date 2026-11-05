@@ -5,6 +5,8 @@ import { fmtDate, fmtTimeHM } from "../format";
 import { modeLabel, nowMinutes, todayStr } from "../modes";
 import { stageLabel, visibleStages } from "../stages";
 import ReportView from "./ReportView";
+import { ANALYSTS } from "../mock";
+import MultiSelect from "./MultiSelect";
 
 // R11-R2：当日复盘 Tab
 // - 打开时调 GET /api/reviews/status?date=today（T2 后端提供）
@@ -28,6 +30,12 @@ export default function ReviewTab({
   const [confirmDel, setConfirmDel] = useState(null); // {date, time}
   const [delBusy, setDelBusy] = useState(false);
   const [delError, setDelError] = useState("");
+    const [manualOpen, setManualOpen] = useState(false);
+    const [manualDate, setManualDate] = useState(today);
+    const [manualMode, setManualMode] = useState("close");
+    const [manualAnalysts, setManualAnalysts] = useState(ANALYSTS.map((a) => a.id));
+    const [manualBusy, setManualBusy] = useState(false);
+    const [manualError, setManualError] = useState("");
 
   const pollTimerRef = useRef(null);
   const checkingRef = useRef(false);
@@ -85,7 +93,8 @@ export default function ReviewTab({
 
   // 自动任务进度轮询（复用 api.getJob + normalizeJob）
   const startJobPoll = useCallback(
-    (jobId) => {
+      (jobId, dateOverride) => {
+        const doneDate = dateOverride || today;
       stopJobPoll();
       setAutoJob({
         id: jobId,
@@ -101,9 +110,9 @@ export default function ReviewTab({
             stopJobPoll();
             if (mountedRef.current) setAutoJob(null);
             try {
-              const detail = await loadReviewByDate(today);
+                const detail = await loadReviewByDate(doneDate);
               if (mountedRef.current) {
-                setCurrent({ date: today, detail });
+                  setCurrent({ date: doneDate, detail });
                 setStatus((s) => ({ ...(s || {}), has_today_review: true, pending_job_id: null }));
               }
             } catch {
@@ -128,6 +137,29 @@ export default function ReviewTab({
     },
     [stopJobPoll, loadReviewByDate, today, onRetryHistory]
   );
+
+    const manualStart = useCallback(async () => {
+      if (!manualDate) {
+        setManualError("请选择复盘日期");
+        return;
+      }
+      setManualBusy(true);
+      setManualError("");
+      try {
+        const res = await api.startReview({
+          date: manualDate,
+          mode: manualMode,
+          analysts: manualAnalysts.length ? manualAnalysts : undefined,
+        });
+        if (res && res.job_id) {
+          startJobPoll(res.job_id, manualDate);
+        }
+      } catch (err) {
+        setManualError((err && err.message) || "提交失败，请稍后重试");
+      } finally {
+        setManualBusy(false);
+      }
+    }, [manualDate, manualMode, manualAnalysts, startJobPoll]);
 
   const runAutoCheck = useCallback(async () => {
     if (checkingRef.current) return;
@@ -265,6 +297,52 @@ export default function ReviewTab({
           onSwitchReview={(date, time) => showReview(date, time)}
         />
       ) : null}
+
+        {/* 手动生成复盘：可选分析师（可多选） */}
+        <div className="card" style={{ marginTop: 18 }}>
+          <div className="card-head-row">
+            <h3 className="card-title">手动生成复盘（可选分析师）</h3>
+            <button className="btn btn-ghost btn-sm" onClick={() => setManualOpen((o) => !o)}>
+              {manualOpen ? "收起" : "展开"}
+            </button>
+          </div>
+          {manualOpen ? (
+            <div className="set-options" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+              <input
+                type="date"
+                className="form-input"
+                style={{ padding: "6px 8px", width: 150 }}
+                value={manualDate}
+                onChange={(e) => setManualDate(e.target.value)}
+              />
+              <select
+                className="form-input form-select"
+                style={{ padding: "6px 8px" }}
+                value={manualMode}
+                onChange={(e) => setManualMode(e.target.value)}
+              >
+                {["close", "noon", "intraday_pm", "intraday_am", "auction", "pre_market"].map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              <div style={{ flexBasis: "100%" }} />
+              <MultiSelect
+                options={ANALYSTS}
+                value={manualAnalysts}
+                onChange={setManualAnalysts}
+                placeholder="选择参与复盘的分析师"
+              />
+              {manualError ? <div className="bt-error">{manualError}</div> : null}
+              <button
+                className="btn btn-accent btn-sm"
+                disabled={manualBusy}
+                onClick={manualStart}
+              >
+                {manualBusy ? "提交中…" : "生成复盘"}
+              </button>
+            </div>
+          ) : null}
+        </div>
 
       {/* 历史复盘列表（复用现有历史分组逻辑） */}
       <div className="card" style={{ marginTop: 18 }}>

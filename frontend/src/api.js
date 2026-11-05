@@ -41,19 +41,26 @@ const CHAT_MESSAGE_TIMEOUT_MS = 240000;
 
 // 带超时的 fetch：杜绝无限卡死（AbortController 中止后抛中文超时错误）
 async function fetchWithTimeout(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(path, { ...options, signal: controller.signal });
-  } catch (err) {
-    if (err && err.name === "AbortError") {
-      throw new ApiError(`请求超时（${Math.round(timeoutMs / 1000)} 秒），请检查后端服务后重试`);
+  // 网络层失败自动重试 1 次（服务繁忙/瞬时连接失败时友好恢复；AbortError 按超时处理）
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(path, { ...options, signal: controller.signal });
+      clearTimeout(timer);
+      return res;
+    } catch (err) {
+      clearTimeout(timer);
+      if (err && err.name === "AbortError") {
+        throw new ApiError(`请求超时（${Math.round(timeoutMs / 1000)} 秒），请检查后端服务后重试`);
+      }
+      // 网络层错误（浏览器 TypeError "Failed to fetch" 等）统一转中文，禁止英文原文上屏
+      lastErr = err;
+      if (attempt === 0) await new Promise((r2) => setTimeout(r2, 1500));
     }
-    // 网络层错误（浏览器 TypeError "Failed to fetch" 等）统一转中文，禁止英文原文上屏
-    throw new ApiError("无法连接后端服务（网络错误），请确认服务已启动、代理已开启后重试");
-  } finally {
-    clearTimeout(timer);
   }
+  throw new ApiError("无法连接后端服务（网络错误），请确认服务已启动、代理已开启后重试");
 }
 
 async function errorFrom(res, fallback) {
@@ -1214,3 +1221,94 @@ function createOfflineChatSession(payload) {
 }
 
 export { ANALYSTS };
+
+// ---------- 涨停复盘工作台（ZT，阶段C）----------
+export async function getZTTracking(date) {
+  const q = date ? "?date=" + encodeURIComponent(date) : "";
+  // 历史/冷日期首查可能较慢（情绪+标签计算），放宽到 60s
+  const res = await fetchWithTimeout("/api/data/zt-tracking" + q, {}, 60000);
+  if (!res.ok) throw await errorFrom(res, "获取涨停复盘数据失败");
+  return await res.json();
+}
+
+export async function getZTRotation(date) {
+  const q = date ? "?date=" + encodeURIComponent(date) : "";
+  const res = await fetchWithTimeout("/api/data/zt-tracking/rotation-pool" + q);
+  if (!res.ok) throw await errorFrom(res, "获取轮动板块池失败");
+  return await res.json();
+}
+
+export async function runZTTracking(dates) {
+  const res = await fetchWithTimeout("/api/data/zt-tracking/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dates: dates || null, force: false }),
+  });
+  if (!res.ok) throw await errorFrom(res, "发起采集失败");
+  return await res.json();
+}
+
+export async function getZTJob(jobId) {
+  const res = await fetchWithTimeout("/api/data/zt-tracking/run/" + encodeURIComponent(jobId), {}, 60000);
+  if (!res.ok) throw await errorFrom(res, "获取任务状态失败");
+  return await res.json();
+}
+
+export async function postZTTag(payload) {
+  const res = await fetchWithTimeout("/api/data/zt-tracking/tags", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await errorFrom(res, "保存人工标记失败");
+  return await res.json();
+}
+
+// ---------- 设置 / 技能（SettingsView 依赖；重建自 backend settings_routes）----------
+export async function getAccountSettings() {
+  const res = await fetchWithTimeout("/api/settings/accounts");
+  if (!res.ok) throw await errorFrom(res, "获取模拟账户设置失败");
+  return await res.json();
+}
+
+export async function saveAccountSettings(payload) {
+  const res = await fetchWithTimeout("/api/settings/accounts", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await errorFrom(res, "保存模拟账户设置失败");
+  return await res.json();
+}
+
+export async function getLlmSettings() {
+  const res = await fetchWithTimeout("/api/settings/llm");
+  if (!res.ok) throw await errorFrom(res, "获取 LLM 设置失败");
+  return await res.json();
+}
+
+export async function saveLlmSettings(payload) {
+  const res = await fetchWithTimeout("/api/settings/llm", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await errorFrom(res, "保存 LLM 设置失败");
+  return await res.json();
+}
+
+export async function getSkills() {
+  const res = await fetchWithTimeout("/api/skills");
+  if (!res.ok) throw await errorFrom(res, "获取分析师技能失败");
+  return await res.json();
+}
+
+export async function saveSkill(skillId, payload) {
+  const res = await fetchWithTimeout("/api/skills/" + encodeURIComponent(skillId), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await errorFrom(res, "保存分析师提示词失败");
+  return await res.json();
+}

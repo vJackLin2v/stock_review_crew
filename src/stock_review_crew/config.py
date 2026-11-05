@@ -43,6 +43,15 @@ if _ENV_FILE.exists():
     load_dotenv(dotenv_path=_ENV_FILE, encoding="utf-8-sig", override=True)
 
 
+
+def _llm_settings_model() -> str:
+    """读取设置页持久化的模型名；未设置时回退 .env DEEPSEEK_MODEL。"""
+    try:
+        from .accounts.storage import load_llm_model
+        return load_llm_model(DEEPSEEK_MODEL) or DEEPSEEK_MODEL
+    except Exception:  # noqa: BLE001 - 设置读取失败不影响 LLM 初始化
+        return DEEPSEEK_MODEL
+
 # ═══════════════════════════════════════
 # 环境变量（数据源凭据只从 .env 读取；缺失时由数据层走降级标注，禁止抛异常）
 # ═══════════════════════════════════════
@@ -58,6 +67,15 @@ BOCHA_SEARCH_ENABLED = os.getenv("BOCHA_SEARCH_ENABLED", "false").strip().lower(
 # LLM（保留原配置）
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+
+# 设置页可选的 LLM 模型（opencode/DeepSeek 兼容名；用户可自行扩展）
+LLM_MODEL_OPTIONS = [
+    "deepseek-v4-flash",
+    "deepseek-v4",
+    "deepseek-r1-0528",
+    "deepseek-chat",
+    "deepseek-reasoner",
+]
 # 兼容两种 .env 键名：DEEPSEEK_API_BASE（旧）/ DEEPSEEK_BASE_URL（现用）
 DEEPSEEK_BASE_URL = (
     os.getenv("DEEPSEEK_API_BASE")
@@ -123,7 +141,7 @@ def make_llm(temperature: float = 0.7, timeout: float = 120, max_retries: int = 
     if not DEEPSEEK_API_KEY:
         return None
     return ChatOpenAI(
-        model=DEEPSEEK_MODEL,
+        model=_llm_settings_model(),
         api_key=DEEPSEEK_API_KEY,
         base_url=DEEPSEEK_BASE_URL,
         temperature=temperature,
@@ -137,6 +155,29 @@ llm = make_llm(temperature=0.7, timeout=120, max_retries=2)
 
 # 低温度版本（做判断、总结时用）
 llm_strict = make_llm(temperature=0.1, timeout=120, max_retries=2)
+
+
+def set_llm_model(model: str) -> dict:
+    """设置页持久化 LLM 模型并立即重建 llm/llm_strict 实例。
+
+    - 写入 data/settings/llm.json（后续进程启动也读取该设置）；
+    - 更新模块级 DEEPSEEK_MODEL，并重新创建 llm / llm_strict；
+    - 无 Key / 创建失败时 llm 可能为 None，由调用方走既有降级逻辑。
+    """
+    global DEEPSEEK_MODEL, llm, llm_strict
+    model = str(model or "").strip()
+    if not model:
+        raise ValueError("模型名称不能为空")
+    try:
+        from .accounts.storage import save_llm_model
+        save_llm_model(model)
+    except Exception as exc:  # noqa: BLE001 - 落盘失败不阻断内存切换
+        raise RuntimeError(f"保存模型设置失败：{exc}") from exc
+    DEEPSEEK_MODEL = model
+    llm = make_llm(temperature=0.7, timeout=120, max_retries=2)
+    llm_strict = make_llm(temperature=0.1, timeout=120, max_retries=2)
+    return {"ok": True, "model": model}
+
 
 
 # ═══════════════════════════════════════

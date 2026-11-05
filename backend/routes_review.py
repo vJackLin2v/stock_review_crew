@@ -52,6 +52,16 @@ def create_review(payload: Any = Body(...)) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="缺少参数：mode")
     if mode not in MODES:
         raise HTTPException(status_code=400, detail=f"无效模式：{mode}（可选：{'、'.join(MODES)}）")
+    analysts = payload.get("analysts")
+    if analysts is not None:
+        if not isinstance(analysts, list) or not all(isinstance(x, str) for x in analysts):
+            raise HTTPException(status_code=400, detail="analysts 必须为字符串数组")
+        from stock_review_crew.skills import list_skills
+        valid = {x.get("id") for x in list_skills()}
+        bad = [x for x in analysts if x not in valid]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"不存在的分析师 id：{', '.join(bad)}")
+        analysts = [x for x in analysts if x]
     max_rounds = 3
     if payload.get("max_rounds") is not None:
         try:
@@ -88,18 +98,19 @@ def create_review(payload: Any = Body(...)) -> dict[str, str]:
             "pct": 0,
             "message": "等待开始",
             "analysts_done": 0,
-            "analysts_total": 5,
+            "analysts_total": len(analysts) if analysts else 5,
             "result": None,
             "error": None,
             "_created": time.monotonic(),
             "_finished": None,
             "_date": date,
             "_trace": trace,
+            "_analysts": analysts,
         }
     try:
         threading.Thread(
             target=_run_review_job,
-            args=(job_id, date, mode, max_rounds, trace),
+            args=(job_id, date, mode, max_rounds, trace, analysts),
             daemon=True,
         ).start()
     except Exception as exc:  # noqa: BLE001

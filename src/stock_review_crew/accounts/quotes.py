@@ -152,6 +152,34 @@ def _fetch_tx_quote(code: str) -> Optional[dict]:
     return None
 
 
+def _fetch_tx_history_quote(code: str, date_str: str) -> Optional[dict]:
+    """腾讯历史日K按 date 精确取 OHLC；找不到返回 None。"""
+    try:
+        from stock_review_crew.tools import stock_data
+        prefix = "sh" if code.startswith(("6", "9")) else (
+            "bj" if code.startswith(("4", "8")) else "sz")
+        bars = stock_data._records_from_tx_kline(prefix + code)
+        idx = None
+        for i, b in enumerate(bars):
+            if b.get("date") == date_str:
+                idx = i
+                break
+        if idx is None:
+            return None
+        b = bars[idx]
+        pre = bars[idx - 1].get("close") if idx > 0 else None
+        return {
+            "name": str(b.get("name") or code),
+            "pre_close": float(pre) if pre is not None else None,
+            "open": float(b.get("open")) if b.get("open") is not None else None,
+            "high": float(b.get("high")),
+            "low": float(b.get("low")),
+            "close": float(b.get("close")),
+        }
+    except Exception:  # noqa: BLE001 - 历史兜底失败返回 None
+        return None
+
+
 def _fetch_day_quote_ex(code: str, date_str: str) -> tuple[Optional[dict], str]:
     """内部实现：返回 (行情, 来源)。来源：fetch_stock_info / 腾讯qt.gtimg.cn / ""。
 
@@ -201,17 +229,23 @@ def _fetch_day_quote_ex(code: str, date_str: str) -> tuple[Optional[dict], str]:
                 close = last.get("close")
         if pre_close is None or high is None or low is None:
             return None, ""
-        return {
-            "date": date_str,
-            "name": name,
-            "pre_close": float(pre_close),
-            "open": float(open_) if open_ is not None else None,
-            "high": float(high),
-            "low": float(low),
-            "close": float(close) if close is not None else float(pre_close),
-        }, "fetch_stock_info"
+        if str(info.get("date")) == date_str:
+            return {
+                "date": date_str,
+                "name": name,
+                "pre_close": float(pre_close),
+                "open": float(open_) if open_ is not None else None,
+                "high": float(high),
+                "low": float(low),
+                "close": float(close) if close is not None else float(pre_close),
+                "list_date": info.get("list_date") or info.get("listing_date"),
+            }, "fetch_stock_info"
     except Exception:  # noqa: BLE001 - 主源失败；仅当天允许腾讯实时兜底
         pass
+    # 主源返回了非目标日数据（或失败）：用腾讯历史日K按 date 精确取数
+    tx_hist = _fetch_tx_history_quote(code, date_str)
+    if tx_hist is not None:
+        return tx_hist, "腾讯日K历史"
     if date_str != datetime.now().strftime("%Y-%m-%d"):
         # 历史日期：不采信实时价（实时价 ≠ 历史行情），标记缺失由调用方降级
         return None, ""

@@ -3,8 +3,8 @@ import * as echarts from "echarts";
 import { fmtCount, fmtPct, num } from "../format";
 import { paletteOf, useSettings } from "../settings";
 
-// R12：图表主色与全局强调色（紫）保持一致
-const ACCENT = "#6859cf";
+// R12：图表主色与全局强调色（A股复盘红）保持一致
+const ACCENT = "#c8423c";
 // 涨跌配色跟随设置（红涨绿跌默认 / 绿涨红跌可切换）；零中性灰固定
 const NEUTRAL = "#adb5bd";
 const TEXT2 = "#7a7f87";
@@ -110,8 +110,8 @@ export function IndexMinuteChart({ indices }) {
         symbol: "circle",
         symbolSize: 4,
         data: r.points.map((p) => Math.round(p.value * 100) / 100),
-        lineStyle: { width: 2, color: k === 0 ? ACCENT : "#6d5bd0" },
-        itemStyle: { color: k === 0 ? ACCENT : "#6d5bd0" },
+        lineStyle: { width: 2, color: k === 0 ? ACCENT : "#a93226" },
+        itemStyle: { color: k === 0 ? ACCENT : "#a93226" },
         areaStyle:
           k === 0
             ? {

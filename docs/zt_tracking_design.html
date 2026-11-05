@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>涨停复盘 · 板块轮动工作台（设计稿 v0.2 单页卡片版）</title>
+<style>
+  :root{
+    --bg:#F7F7F5; --card:#FFFFFF; --border:#E6E4DF; --border-soft:#EFEDE8;
+    --ink:#20242B; --muted:#8A8F98; --accent:#10A37F;
+    --red:#E03131; --green:#0CA678; --amber:#F08C00;
+    --blue:#1971C2; --purple:#9C36B5; --youzi:#E8590C;
+    --text:#20242B; --text-2:#8A8F98;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); color:var(--ink); font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; font-size:14px; line-height:1.55;}
+  .wrap{max-width:1240px; margin:0 auto; padding:20px 22px 48px;}
+  .topbar{display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px;}
+  .topbar h1{font-size:19px;}
+  .topbar .date{color:var(--muted); font-size:13px;}
+  .probe{border:1px solid #F1D9B8; background:#FFF3E8; color:#B25E09; font-size:12px; padding:3px 8px; border-radius:999px;}
+  .btn{background:var(--accent); color:#fff; border:none; padding:8px 16px; border-radius:8px; font-size:13px; cursor:pointer; margin-left:auto;}
+  .btn:hover{filter:brightness(1.08);}
+  .disclaimer{background:#FFF9F0; border:1px solid #F1D9B8; color:#8A5B12; font-size:12px; padding:8px 12px; border-radius:8px; margin-bottom:16px;}
+  .toast{font-size:12px; color:var(--muted); min-height:18px; margin-bottom:10px;}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px 18px; margin-bottom:16px;}
+  .card-title{font-size:16px; font-weight:700; letter-spacing:0.1px; margin:0 0 4px;}
+  .card-sub{font-size:12px; color:var(--text-2); margin:0 0 14px;}
+  .card h2{font-size:15px; margin:0 0 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+  .card h2 .tag{font-size:11px; font-weight:400; color:var(--muted);}
+  .pill{font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid var(--border); color:var(--muted); background:#fff;}
+  .pill.focus{background:#FDECEC; color:var(--red); border-color:#F3C2C2;}
+  .pill.rotation{background:#FFF3E8; color:#B25E09; border-color:#F1D9B8;}
+  .up{color:var(--red);} .down{color:var(--green);} .neutral{color:var(--ink);}
+  /* ---- 市场天气（复刻项目首页 F3 情绪天气卡）---- */
+  .weather-head{display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;}
+  .weather-big{font-size:34px; font-weight:800; letter-spacing:1px; line-height:1.15; display:flex; align-items:center; gap:10px;}
+  .weather-emoji{font-size:32px;}
+  .emotion-score{font-size:26px; font-weight:800; fill:var(--text);}
+  .emotion-unit{font-size:10px; fill:var(--text-2);}
+  .weather-label{font-size:15px; font-weight:700; margin-top:10px;}
+  .weather-metrics{display:flex; flex-wrap:wrap; gap:6px; margin-top:10px;}
+  .tag-chip{font-size:11.5px; padding:3px 9px; border-radius:6px; background:#F1F0EC; color:#555;}
+  .tag-chip b{color:var(--ink);}
+  .tag-chip b.pos{color:var(--red);} .tag-chip b.neg{color:var(--green);}
+  .weather-reasons{margin-top:12px; border-top:1px dashed var(--border-soft); padding-top:10px;}
+  .rt-col-title{font-size:12px; color:var(--muted); margin-bottom:4px;}
+  .weather-reason{display:flex; gap:8px; font-size:12px; color:var(--text-2); padding:3px 0; line-height:1.55;}
+  .weather-reason::before{content:"▸"; color:var(--accent); flex-shrink:0;}
+  /* ---- 梯队 ---- */
+  .ladder-row{display:flex; align-items:center; gap:10px; margin-bottom:8px;}
+  .ladder-row .lbl{width:52px; font-size:12px; color:var(--muted);}
+  .ladder-row .bar{flex:1; height:18px; background:#F1F0EC; border-radius:5px; overflow:hidden;}
+  .ladder-row .bar i{display:block; height:100%; background:linear-gradient(90deg,#FA6B69,#E03131); border-radius:5px;}
+  .ladder-row .num{width:36px; text-align:right; font-weight:700; color:var(--red);}
+  .legend{font-size:12px; color:var(--muted); margin-top:10px;}
+  /* ---- 题材卡 ---- */
+  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:12px;}
+  .topic{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px 16px; border-top:3px solid var(--accent);}
+  .topic.focus{border-top-color:var(--red); box-shadow:0 2px 10px rgba(224,49,49,.08);}
+  .topic .head{display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap;}
+  .topic .head h3{font-size:15px;}
+  .topic .meta{font-size:12px; color:var(--muted); margin-bottom:8px;}
+  .topic .meta b{color:var(--ink);}
+  .chips{display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;}
+  .chip{font-size:11px; padding:2px 8px; border-radius:6px; background:#F1F0EC; color:#555;}
+  .chip.y{background:#FDECEC; color:var(--red);}
+  .chip.j{background:#E7F1FC; color:var(--blue);}
+  .chip.l{background:#F3EAFB; color:var(--purple);}
+  .chip.b{background:#E7FBF3; color:var(--green);}
+  /* ---- 表格 ---- */
+  table{width:100%; border-collapse:collapse; background:var(--card); border-radius:12px; overflow:hidden; border:1px solid var(--border);}
+  th,td{padding:10px 12px; text-align:left; border-bottom:1px solid #F0EFEA; font-size:13px;}
+  th{background:#FAFAF8; color:var(--muted); font-weight:600; font-size:12px;}
+  tr:last-child td{border-bottom:none;}
+  tr:hover td{background:#FBFBF9;}
+  /* ---- 核心股 ---- */
+  .core-cols{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
+  @media (max-width:900px){.core-cols{grid-template-columns:1fr;}}
+  .core-group h3{font-size:14px; margin-bottom:10px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+  .core{background:var(--card); border:1px solid var(--border); border-left:4px solid var(--accent); border-radius:10px; padding:12px 14px; margin-bottom:10px;}
+  .core.shibie{border-left-color:var(--red);}
+  .core .top{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+  .core .top .name{font-weight:700; font-size:15px;}
+  .core .top .code{color:var(--muted); font-size:12px;}
+  .core .tags{margin:8px 0 6px; display:flex; flex-wrap:wrap; gap:6px;}
+  .core .info{font-size:12px; color:var(--muted); display:flex; flex-wrap:wrap; gap:12px;}
+  .core .info b{color:var(--ink);}
+  .signal{display:inline-block; font-size:12px; padding:3px 10px; border-radius:999px; margin-top:8px;}
+  .signal.buy{background:#E7FBF3; color:#087F5B;}
+  .signal.chase{background:#FDECEC; color:var(--red);}
+  .signal.wait{background:#F1F0EC; color:#6B7280;}
+  footer{margin-top:8px; color:var(--muted); font-size:12px; border-top:1px solid var(--border); padding-top:14px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <h1>涨停复盘 · 板块轮动工作台</h1>
+    <span class="date">2026-08-28 周五 · 收盘 | 更新 15:20</span>
+    <span class="probe">原型 v0.2 · 单页卡片 · 模拟数据</span>
+    <button class="btn" onclick="document.getElementById('toast').textContent='模拟入口：接入后此处一键调用 work/zt_tracking.py（手动采集当日数据）'">手动刷新</button>
+  </div>
+  <div class="disclaimer">⚠️ 本页面为设计稿，数据均为模拟演示，非真实行情。仅供参考，不构成投资建议。</div>
+  <div id="toast" class="toast"></div>
+
+  <!-- 卡片 1：市场天气（复刻首页 F3 情绪天气卡） -->
+  <div class="card">
+    <h2 class="card-title">市场天气</h2>
+    <p class="card-sub">情绪温度 · 2026-08-28</p>
+    <div class="weather-head">
+      <div class="weather-big"><span class="weather-emoji">☀️</span>晴间多云</div>
+      <svg width="118" height="118" viewBox="0 0 118 118" aria-label="情绪温度环">
+        <circle cx="59" cy="59" r="44" fill="none" stroke="#EFEDE8" stroke-width="10"></circle>
+        <circle cx="59" cy="59" r="44" fill="none" stroke="#FAB005" stroke-width="10" stroke-linecap="round"
+                stroke-dasharray="172.8 276.5" transform="rotate(-90 59 59)"></circle>
+        <text x="59" y="57" text-anchor="middle" class="emotion-score">62</text>
+        <text x="59" y="77" text-anchor="middle" class="emotion-unit">情绪温度</text>
+      </svg>
+    </div>
+    <div class="weather-label" style="color:#F08C00;">情绪温度 62 分 · 发酵升温</div>
+    <div class="weather-metrics">
+      <span class="tag-chip">上涨占比 <b>68.0%</b></span>
+      <span class="tag-chip">涨停 <b class="pos">46</b></span>
+      <span class="tag-chip">跌停 <b class="neg">4</b></span>
+      <span class="tag-chip">炸板率 <b>20.7%</b></span>
+      <span class="tag-chip">连板高度 <b>4板</b></span>
+      <span class="tag-chip">红盘率 <b>58.1%</b></span>
+    </div>
+    <div class="weather-reasons">
+      <div class="rt-col-title">评分依据（base 50 + 各项加减分）</div>
+      <div class="weather-reason">涨停 46 家较昨日 +8，赚钱效应扩散（+8）</div>
+      <div class="weather-reason">昨日涨停今日平均收益 +2.13%、红盘率 58.1%（+4）</div>
+      <div class="weather-reason">最高连板 4 板，连板梯队完整（高度抬升）（+3）</div>
+      <div class="weather-reason">炸板率 20.7% 处于中性区间（-0）</div>
+      <div class="weather-reason">核按钮率 4.3% 极低，跌停仅 4 家（+2）</div>
+    </div>
+  </div>
+
+  <!-- 卡片 2：涨停梯队 -->
+  <div class="card">
+    <h2>今日涨停梯队 <span class="tag">按连板数分组（已过滤 ST / 退市 / 上市未满一年 / 北证）</span></h2>
+    <div class="ladder-row"><span class="lbl">5板+</span><div class="bar"><i style="width:7%"></i></div><span class="num">1</span></div>
+    <div class="ladder-row"><span class="lbl">4板</span><div class="bar"><i style="width:21%"></i></div><span class="num">3</span></div>
+    <div class="ladder-row"><span class="lbl">3板</span><div class="bar"><i style="width:36%"></i></div><span class="num">5</span></div>
+    <div class="ladder-row"><span class="lbl">2板</span><div class="bar"><i style="width:64%"></i></div><span class="num">9</span></div>
+    <div class="ladder-row"><span class="lbl">首板</span><div class="bar"><i style="width:100%"></i></div><span class="num">28</span></div>
+    <div class="legend">一字板 4 只（未开板 2 只）· T字板 2 只 · 封板时间：09:30-10:00 封板 21 只、午后 7 只</div>
+  </div>
+
+  <!-- 卡片 3：主线题材（可关注板块 + 重点关注标签） -->
+  <div class="card">
+    <h2>主线题材 <span class="tag">梯队完整（首板+二板+更多）= 重点关注 · 独立涨停不计入板块</span></h2>
+    <div class="grid">
+      <div class="topic focus">
+        <div class="head"><h3>存储芯片</h3><span class="pill focus">重点关注</span><span class="pill">持续性 3/5 天</span></div>
+        <div class="meta">涨停 <b>6</b> 家 · 最高 <b>3板</b> · 梯队 首板3/2板2/3板1 · 中军 <b>兆易创新</b></div>
+        <div class="chips"><span class="chip y">游资×3</span><span class="chip j">机构×1</span><span class="chip">佰维存储</span><span class="chip">德明利</span><span class="chip">江波龙</span></div>
+      </div>
+      <div class="topic focus">
+        <div class="head"><h3>AI算力 / CPO</h3><span class="pill focus">重点关注</span><span class="pill">持续性 4/5 天</span></div>
+        <div class="meta">涨停 <b>5</b> 家 · 最高 <b>5板</b> · 梯队 2/1/1/1 · 辨识度核心 <b>中际旭创</b></div>
+        <div class="chips"><span class="chip y">游资×2</span><span class="chip j">机构×2</span><span class="chip">新易盛</span><span class="chip">天孚通信</span></div>
+      </div>
+      <div class="topic rotation">
+        <div class="head"><h3>低空经济</h3><span class="pill rotation">轮动 · 新晋</span><span class="pill">今日入轮动池</span></div>
+        <div class="meta">涨停 <b>3</b> 家 · 最高 <b>2板</b> · 梯队 首板2/2板1 · 中军 <b>万丰奥威</b></div>
+        <div class="chips"><span class="chip y">游资×1</span><span class="chip">宗申动力</span><span class="chip">中信海直</span></div>
+      </div>
+      <div class="topic rotation">
+        <div class="head"><h3>机器人</h3><span class="pill rotation">轮动</span><span class="pill">近3天2次</span></div>
+        <div class="meta">涨停 <b>4</b> 家 · 最高 <b>2板</b> · 梯队 首板3/2板1 · 观望中军是否跟进</div>
+        <div class="chips"><span class="chip">鸣志电器</span><span class="chip">绿的谐波</span></div>
+      </div>
+      <div class="topic">
+        <div class="head"><h3>稀土永磁</h3><span class="pill">关注</span></div>
+        <div class="meta">涨停 <b>2</b> 家 · 最高首板 · 持续性 1/5 天</div>
+        <div class="chips"><span class="chip">北方稀土</span><span class="chip">金力永磁</span></div>
+      </div>
+    </div>
+    <div class="legend">未归类独立涨停 12 只（视为一日游偷袭，不建板块）。</div>
+  </div>
+
+  <!-- 卡片 4：轮动板块池 -->
+  <div class="card">
+    <h2>轮动板块池 <span class="tag">口径（已确认）：5 天内 ≥3 天有涨停，或 10 天内 ≥5 天有涨停 → 轮动池 + 重点关注</span></h2>
+    <table>
+      <thead><tr><th>板块</th><th>5日涨停天数</th><th>10日涨停天数</th><th>最近出现</th><th>最高板</th><th>标签</th></tr></thead>
+      <tbody>
+        <tr><td><b>存储芯片</b></td><td class="up">3</td><td class="up">5</td><td>今日</td><td>3板</td><td><span class="pill focus">重点关注</span></td></tr>
+        <tr><td><b>AI算力 / CPO</b></td><td class="up">4</td><td class="up">6</td><td>今日</td><td>5板</td><td><span class="pill focus">重点关注</span></td></tr>
+        <tr><td><b>低空经济</b></td><td class="up">3</td><td class="up">5</td><td>今日</td><td>2板</td><td><span class="pill rotation">轮动（新晋）</span></td></tr>
+        <tr><td><b>机器人</b></td><td class="neutral">2</td><td class="up">3</td><td>今日</td><td>2板</td><td><span class="pill rotation">轮动</span></td></tr>
+        <tr><td><b>军工 / 卫星</b></td><td class="neutral">2</td><td class="up">4</td><td>3日前</td><td>3板</td><td><span class="pill rotation">轮动</span></td></tr>
+        <tr><td><b>固态电池</b></td><td class="neutral">1</td><td class="neutral">2</td><td>5日前</td><td>首板</td><td><span class="pill">观察</span></td></tr>
+      </tbody>
+    </table>
+    <div class="legend">历史数据来自 data/zt_tracking/{日期}.json（每日手动触发采集落盘）。</div>
+  </div>
+
+  <!-- 卡片 5：核心股池（辨识度核心 + 中军） -->
+  <div class="card">
+    <h2>核心股池 <span class="tag">= 辨识度核心 + 中军 两组（已确认）</span></h2>
+    <div class="core-cols">
+      <div class="core-group">
+        <h3>辨识度核心 <span class="pill">主营直接受益 / 逻辑稀缺 / 空间龙连板龙 / 活口</span></h3>
+        <div class="core shibie">
+          <div class="top"><span class="name">佰维存储</span><span class="code">300318</span><span class="pill focus">主营直接受益</span></div>
+          <div class="tags"><span class="chip">存储芯片</span><span class="chip y">游资</span><span class="chip">2板（分歧日）</span></div>
+          <div class="info"><span>首封 <b>09:41</b></span><span>流通市值 <b>132亿</b></span><span>炸板 <b>1</b></span></div>
+          <span class="signal buy">情绪未退潮 · 分歧低吸</span>
+        </div>
+        <div class="core shibie">
+          <div class="top"><span class="name">海能达</span><span class="code">002583</span><span class="pill focus">弱转强样本</span></div>
+          <div class="tags"><span class="chip">通信 / 星链</span><span class="chip y">游资×2</span><span class="chip">断板回踩</span></div>
+          <div class="info"><span>首封 <b>10:05</b></span><span>流通市值 <b>96亿</b></span><span>量能 <b>缩量企稳</b></span></div>
+          <span class="signal chase">竞价弱转强则追涨</span>
+        </div>
+        <div class="core shibie">
+          <div class="top"><span class="name">平潭发展</span><span class="code">000592</span><span class="pill">空间龙 / 连板龙</span></div>
+          <div class="tags"><span class="chip">福建自贸</span><span class="chip">首板</span></div>
+          <div class="info"><span>首封 <b>14:23</b></span><span>流通市值 <b>78亿</b></span><span>尾盘封板 <b>弱</b></span></div>
+          <span class="signal wait">观察（一日游风险）</span>
+        </div>
+      </div>
+      <div class="core-group">
+        <h3>中军 <span class="pill">流通市值 &gt;100 亿 · 机游联动（游资+机构席位共现）</span></h3>
+        <div class="core">
+          <div class="top"><span class="name">中际旭创</span><span class="code">300308</span><span class="pill">中军 + 辨识度核心</span></div>
+          <div class="tags"><span class="chip">AI算力 / CPO</span><span class="chip j">机构×2</span><span class="chip l">量化×1</span><span class="chip">阶段涨幅领跑</span></div>
+          <div class="info"><span>流通市值 <b>1,842亿</b></span><span>20cm <b>+20.00%</b></span><span>净买 <b>3.4亿</b></span></div>
+          <span class="signal buy">回踩5日线低吸</span>
+        </div>
+        <div class="core">
+          <div class="top"><span class="name">兆易创新</span><span class="code">603986</span><span class="pill">存储中军</span></div>
+          <div class="tags"><span class="chip">存储芯片</span><span class="chip j">机构</span><span class="chip">均线多头</span></div>
+          <div class="info"><span>流通市值 <b>1,120亿</b></span><span>+10.00%</span><span>净买 <b>1.8亿</b></span></div>
+          <span class="signal buy">板块分歧低吸</span>
+        </div>
+        <div class="core">
+          <div class="top"><span class="name">中芯国际</span><span class="code">688981</span><span class="pill">半导体中军</span></div>
+          <div class="tags"><span class="chip">半导体</span><span class="chip j">机构</span><span class="chip">趋势多头</span></div>
+          <div class="info"><span>流通市值 <b>5,200亿</b></span><span>+12.4%</span><span>事件驱动</span></div>
+          <span class="signal wait">事件确认后参与</span>
+        </div>
+      </div>
+    </div>
+    <div class="legend">席位色：<span class="chip">游资</span><span class="chip j">机构</span><span class="chip l">量化</span><span class="chip">未知（可人工标记）</span>；时机提示为收盘方向的规则初筛，盘中验证后续版本再做。</div>
+  </div>
+
+  <!-- 卡片 6：龙虎榜席位 -->
+  <div class="card">
+    <h2>龙虎榜 · 席位类型 <span class="tag">规则：机构专用=机构；命中名单=游资/量化；其余未知，可人工标记</span></h2>
+    <table>
+      <thead><tr><th>上榜股</th><th>涨幅</th><th>净买额</th><th>买1（类型）</th><th>买2（类型）</th><th>卖1（类型）</th><th>席位摘要</th></tr></thead>
+      <tbody>
+        <tr><td><b>中际旭创</b> 300308</td><td class="up">+20.00%</td><td class="up">3.4亿</td><td>机构专用 <span class="chip j">机构</span></td><td>深股通 <span class="chip">未知</span></td><td>机构专用 <span class="chip j">机构</span></td><td><span class="chip j">机构×2</span><span class="chip l">量化×1</span></td></tr>
+        <tr><td><b>佰维存储</b> 300318</td><td class="up">+20.00%</td><td class="up">1.2亿</td><td>华鑫上海茅台路 <span class="chip y">游资</span></td><td>国泰君安总部 <span class="chip y">游资</span></td><td>机构专用 <span class="chip j">机构</span></td><td><span class="chip y">游资×2</span><span class="chip j">机构×1</span></td></tr>
+        <tr><td><b>平潭发展</b> 000592</td><td class="up">+10.03%</td><td class="up">0.9亿</td><td>财通温岭中华路 <span class="chip y">游资</span></td><td>东方财富拉萨 <span class="chip y">游资</span></td><td>东方财富拉萨 <span class="chip y">游资</span></td><td><span class="chip y">游资×3</span></td></tr>
+        <tr><td><b>某退市整理股</b> 600XXX</td><td class="up">+4.9%</td><td>—</td><td colspan="3">已按规则排除（名称含「退」）— 不进入涨停池</td><td><span class="chip">排除</span></td></tr>
+      </tbody>
+    </table>
+    <div class="legend">机游联动（游资+机构共现）：佰维存储、中际旭创均满足，题材生命力加分（语料3）。</div>
+  </div>
+
+  <footer>
+    设计稿 v0.2 说明：单页卡片布局、无 Tab；情绪区复刻本项目首页「市场天气」卡（SVG 情绪温度环 + 天气 + 指标 chips + 评分依据）。
+    数据均为模拟演示。<br>⚠️ 仅供参考，不构成投资建议。
+  </footer>
+</div>
+</body>
+</html>

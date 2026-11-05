@@ -15,6 +15,8 @@ import ProgressView from "./components/ProgressView";
 import ReportView from "./components/ReportView";
 import StockDetail from "./components/StockDetail";
 import SettingsView from "./components/SettingsView";
+import SkillPromptsView from "./components/SkillPromptsView";
+import AnomalyView from "./components/AnomalyView";
 // R12-A3：侧栏「模拟账户」独立视图（分析师模拟账户展示）
 import AccountsPanel from "./components/AccountsPanel";
 // requirements-backtest-ui：侧栏「回测」独立视图（历史回测可视化）
@@ -292,6 +294,19 @@ export default function App() {
     setView("settings");
   }, []);
 
+  // 2026-08-17：分析师提示词独立页面
+  const handleOpenPrompts = useCallback(() => {
+    setSidebarOpen(false);
+    setView("prompts");
+  }, []);
+
+  // 2026-08-17：监管异动独立页面
+  const handleOpenAnomaly = useCallback(() => {
+    setSidebarOpen(false);
+    setView("anomaly");
+  }, []);
+
+
   // R12-A3：侧栏「模拟账户」→ 独立视图（AccountsPanel 自带返回）
   const handleOpenAccounts = useCallback(() => {
     setSidebarOpen(false);
@@ -344,9 +359,13 @@ export default function App() {
           ? "模拟账户"
           : view === "backtest"
             ? "历史回测"
-            : view === "settings"
-              ? "设置"
-              : "首页";
+              : view === "anomaly"
+                ? "监管异动"
+            : view === "prompts"
+              ? "分析师提示词"
+              : view === "settings"
+                ? "设置"
+                : "首页";
 
   return (
     <ErrorBoundary onReset={handleNew}>
@@ -378,6 +397,8 @@ export default function App() {
           onOpenSettings={handleOpenSettings}
           onOpenAccounts={handleOpenAccounts}
           onOpenBacktest={handleOpenBacktest}
+            onOpenPrompts={handleOpenPrompts}
+            onOpenAnomaly={handleOpenAnomaly}
         />
         <main className="main">
           <header className="topbar">
@@ -425,13 +446,17 @@ export default function App() {
               />
             ) : view === "stock" && stockQuery ? (
               <StockDetail query={stockQuery} onBack={handleCloseStockDetail} />
-            ) : view === "settings" ? (
-              <SettingsView />
-            ) : view === "accounts" ? (
-              <AccountsPanel onBack={handleNew} />
-            ) : view === "backtest" ? (
-              <BacktestView onBack={handleNew} />
-            ) : (
+              ) : view === "settings" ? (
+                <SettingsView onOpenPrompts={handleOpenPrompts} />
+              ) : view === "accounts" ? (
+                <AccountsPanel onBack={handleNew} />
+              ) : view === "backtest" ? (
+                <BacktestView onBack={handleNew} />
+              ) : view === "anomaly" ? (
+                <AnomalyView onBack={handleNew} />
+              ) : view === "prompts" ? (
+                <SkillPromptsView onBack={handleOpenSettings} />
+              ) : (
               <HomeView
                 homeTab={homeTab}
                 onHomeTabChange={setHomeTab}

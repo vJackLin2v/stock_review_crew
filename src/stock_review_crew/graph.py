@@ -18,7 +18,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from langgraph.graph import END, StateGraph
 
@@ -61,10 +61,11 @@ _last_pct_var: Any = None
 _progress_lock: Any = None
 _analyst_events_var: Any = None
 _lite_var: Any = None
+_selected_analysts_var: Any = None
 
 
 def _progress_context() -> None:
-    global _progress_var, _last_pct_var, _progress_lock, _analyst_events_var, _lite_var
+    global _progress_var, _last_pct_var, _progress_lock, _analyst_events_var, _lite_var, _selected_analysts_var
     import contextvars
     import threading
 
@@ -83,6 +84,7 @@ def _progress_context() -> None:
         # compiled.invoke 传播到 host/report 节点（ReviewState 未声明 lite 字段，
         # 额外键会在 graph invoke 时被丢弃，故用 ContextVar 承载）。
         _lite_var = contextvars.ContextVar("review_lite", default=False)
+        _selected_analysts_var = contextvars.ContextVar("review_selected_analysts", default=None)
 
 
 def set_progress_callback(callback, analyst_events: bool = False):
@@ -196,7 +198,12 @@ def _make_account_tools(skill_id: str):
     def get_positions() -> str:
         acct = acct_storage.load_account(skill_id)
         if acct is None:
-            return json.dumps({"ok": True, "cash": 100000.0, "positions": []},
+              try:
+                  from .accounts import engine as _acct_engine
+                  _cash = _acct_engine.initial_cash()
+              except Exception:  # noqa: BLE001 - 读取设置失败按 10 万兜底
+                  _cash = 100000.0
+              return json.dumps({"ok": True, "cash": _cash, "positions": []},
                               ensure_ascii=False)
         acct["trades"] = acct_storage.load_trades(skill_id)
         rows = []
@@ -381,7 +388,7 @@ def _dict_to_md(value, indent=0):
     prefix = "  " * indent
     if isinstance(value, dict):
         for k, v in value.items():
-            if k in ("raw", "daily"):
+            if k in ("raw", "daily", "degraded", "degraded_reason"):
                 continue
             if isinstance(v, (dict, list)):
                 lines.append(f"{prefix}- {k}:")
@@ -437,7 +444,7 @@ def _block_md(label, value, cap=40):
         header += f"（来源：{value['source']}）"
     lines = [header, ""]
     if isinstance(value, dict):
-        if value.get("degraded"):
+        if value.get("degraded") and not _block_usable(value):
             reasons = "；".join(str(r) for r in (value.get("degraded_reason") or []))
             lines.append(f"- 降级：{reasons or '数据源降级'}")
         if value.get("note"):
@@ -945,7 +952,11 @@ def _llm_analyst(state, skill, group, trend_context):
     """单分析师 LLM 推理（含工具调用循环）；任何失败返回 None → 规则引擎。"""
     try:
         llm, _ = _llm_pair()
-        base_prompt = prompts.build_analyst_prompt(state, group, trend_context, style_anchor=skill.get("style_anchor", ""))
+        base_prompt = prompts.build_analyst_prompt(
+            state, group, trend_context,
+            style_anchor=skill.get("style_anchor", ""),
+            trading_model=skill.get("trading_model", ""),
+        )
         # R12：注入模拟账户状态与 A 股规则铁律（仅查持仓工具，下单类工具已移除——
         # 2026-08-12 用户确认：分析师只按冻结格式输出推荐行，计划由程序解析文本自动记录）
         from .accounts import engine as acct_engine
@@ -958,7 +969,9 @@ def _llm_analyst(state, skill, group, trend_context):
             acct["trades"] = []
         else:
             acct["trades"] = acct_storage.load_trades(skill_id)
-        account_block = prompts.build_account_block(acct, state.get("date") or "")
+        account_block = prompts.build_account_block(
+            acct, state.get("date") or "", skill_id=skill_id,
+        )
         if account_block:
             base_prompt = f"{base_prompt}\n\n{account_block}"
         get_stock_info, search_history = _load_analyst_tools()
@@ -1346,7 +1359,12 @@ def _run_analysts(state):
     R15/R2（2026-08-12 用户反馈）：进度事件统一为单一「分析师」阶段（分析师 n/5），
     不再分趋势派/情绪派两个阶段；全部完成后按组排序统一发射，pct 单调（20→40）。
     """
-    skills = [s for s in list_skills() if s.get("group") in ("trend", "sentiment", "both")]
+    selected = _selected_analysts_var.get() if _selected_analysts_var is not None else None
+    skills = [
+        s for s in list_skills()
+        if s.get("group") in ("trend", "sentiment", "both")
+        and (selected is None or s.get("id") in selected)
+    ]
     if not skills:
         return []
     _ANALYST_TIMEOUT = 300.0  # R12 修复：单批分析师整体超时，超时者降级为规则引擎
@@ -1401,21 +1419,23 @@ def _run_analysts(state):
 
     # 2026-08-10：传播进度 ContextVar 到线程池——每个任务独立 copy_context
     # （同一 Context 对象不能并发进入多个线程，会抛 already entered）
-    with ThreadPoolExecutor(max_workers=max(1, len(skills))) as pool:
-        futures = {pool.submit(contextvars.copy_context().run, _invoke_one, s, i): i
-                   for i, s in enumerate(skills, 1)}
-        try:
-            for future in as_completed(futures, timeout=_ANALYST_TIMEOUT):
-                results.append((futures[future], future.result()))
-        except TimeoutError:
-            # 超时：未完成的分析师降级为规则引擎
-            done_ids = {r[0] for r in results}
-            for i, s in enumerate(skills, 1):
-                if i not in done_ids:
-                    try:
-                        results.append((i, _rule_analyst(state, s, _group_of(s))))
-                    except BaseException:  # noqa: BLE001
-                        results.append((i, None))
+    pool = ThreadPoolExecutor(max_workers=max(1, len(skills)))
+    futures = {pool.submit(contextvars.copy_context().run, _invoke_one, s, i): i
+               for i, s in enumerate(skills, 1)}
+    try:
+        for future in as_completed(futures, timeout=_ANALYST_TIMEOUT):
+            results.append((futures[future], future.result()))
+    except TimeoutError:
+        # 超时：未完成的分析师降级为规则引擎；不 shutdown(wait=True)，避免挂死的 LLM 线程阻塞整个回测
+        done_ids = {r[0] for r in results}
+        for i, s in enumerate(skills, 1):
+            if i not in done_ids:
+                try:
+                    results.append((i, _rule_analyst(state, s, _group_of(s))))
+                except BaseException:  # noqa: BLE001
+                    results.append((i, None))
+    finally:
+        pool.shutdown(wait=False)
     results.sort(key=lambda x: x[0])
 
     # 进度：统一「分析师 n/5」阶段，按组排序后一次发射（trend 在前，保证 pct 单调）。
@@ -1887,11 +1907,15 @@ def default_initial_state(date, mode=DEFAULT_MODE, max_rounds=3,
     }
 
 
-def build_graph(progress_callback=None, analyst_events: bool = False):
+def build_graph(progress_callback=None, analyst_events: bool = False,
+                 analysts: Optional[list[str]] = None):
     """构建并编译 LangGraph：fetch → validate → news → analysts → host → report。
 
     analyst_events=True 时注册「分析师粒度子事件」上报（回测编排器耗时采集用）。
+    analysts 为可选分析师 id 列表；为 None 时使用全部交易型分析师。
     """
+    _progress_context()
+    _selected_analysts_var.set(analysts or None)
     set_progress_callback(progress_callback, analyst_events=analyst_events)
     _reset_progress()
     graph = StateGraph(ReviewState)

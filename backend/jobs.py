@@ -396,7 +396,8 @@ def _new_timing_tracker():
 
 
 def run_review_day(date: str, mode: str, max_rounds: int, trace: bool = True,
-                   progress_cb=None, timing_cb=None, lite: bool = False) -> dict[str, Any]:
+                   progress_cb=None, timing_cb=None, lite: bool = False,
+                   analysts: Optional[list[str]] = None) -> dict[str, Any]:
     """可复用单日复盘核心（单日 job 与历史回测编排器共用）。
 
     上下文注入 → plan.reset → build_graph(invoke) → build_result → save_review →
@@ -447,7 +448,8 @@ def run_review_day(date: str, mode: str, max_rounds: int, trace: bool = True,
         if progress_cb is not None:
             progress_cb(stage, pct, message, meta)
 
-    compiled = graph.build_graph(progress_callback=_cb, analyst_events=True)
+    compiled = graph.build_graph(progress_callback=_cb, analyst_events=True,
+                               analysts=analysts)
     # 2026-08-12：LLM 级 Langfuse 回调按 job 开关——前端页面复盘（trace=true）
     # 开启，面板可见全流程（LLM 调用/取数等子 span）；脚本批量（trace=false）关闭
     # （性能 + 不刷屏）。ContextVar 随分析师线程池 copy_context 传播，并发 job 互不干扰。
@@ -540,13 +542,15 @@ def run_review_day(date: str, mode: str, max_rounds: int, trace: bool = True,
     }
 
 
-def _run_review_job(job_id: str, date: str, mode: str, max_rounds: int, trace: bool = True) -> None:
+def _run_review_job(job_id: str, date: str, mode: str, max_rounds: int, trace: bool = True,
+                    analysts: Optional[list[str]] = None) -> None:
     """后台任务线程（daemon）：run_review_day 薄封装 → done/error（契约不变）。"""
     try:
         _update(job_id, status="running", stage="fetch", pct=1, message="正在注入历史上下文并拉取行情…")
         result = run_review_day(
             date, mode, max_rounds, trace,
             progress_cb=_progress_cb(job_id),
+            analysts=analysts,
         )
         _update(
             job_id,

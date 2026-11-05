@@ -146,10 +146,10 @@ def test_graph_has_single_analysts_node():
 def test_full_flow_five_analysts_one_batch(fetch_mode):
     fetch_mode(lambda mode, date: _fake_data())
     state = _invoke()
-    assert len(state["analyses"]) == 5
+    assert len(state["analyses"]) == 6
     groups = [a["group"] for a in state["analyses"]]
     assert groups.count("trend") == 2
-    assert groups.count("sentiment") == 3
+    assert groups.count("sentiment") == 4
     assert state["degraded"] is False
     assert "仅供参考，不构成投资建议" in state["final_report"]
 
@@ -167,8 +167,8 @@ def test_progress_ordered_and_job_contract(fetch_mode):
     assert pcts[-1] == 100.0
 
     msgs = [e[2] for e in events]
-    assert "分析师 1/5" in "|".join(msgs)
-    assert "分析师 5/5" in "|".join(msgs)
+    assert "分析师 1/6" in "|".join(msgs)
+    assert "分析师 6/6" in "|".join(msgs)
 
     # 模拟 backend._progress_cb：analysts 阶段消息 n/m → analysts_done 单调至 5
     done_list = []
@@ -177,7 +177,7 @@ def test_progress_ordered_and_job_contract(fetch_mode):
         if mt and stage == "analysts":
             done, total = int(mt.group(1)), int(mt.group(2))
             done_list.append((done, total))
-    assert done_list[-1] == (5, 5)
+    assert done_list[-1] == (6, 6)
     assert [d for d, _t in done_list] == sorted(d for d, _t in done_list)
 
 

@@ -268,7 +268,7 @@ def test_review_full_chain(fake_fetch, iso_dirs):
     assert job["stage"] == "done"
     assert job["message"] == "复盘完成"
     assert job["error"] is None
-    assert job["analysts_done"] == 5 and job["analysts_total"] == 5
+    assert job["analysts_done"] == 6 and job["analysts_total"] == 6
 
     res = job["result"]
     record_id = res["record_id"]
@@ -355,7 +355,7 @@ def test_review_full_chain(fake_fetch, iso_dirs):
     body = r.json()
     assert set(body) == {"meta", "report", "analyses", "debate_history", "snapshot"}
     assert body["report"] == res["report"]
-    assert isinstance(body["analyses"], list) and len(body["analyses"]) == 5
+    assert isinstance(body["analyses"], list) and len(body["analyses"]) == 6
     for analyst in body["analyses"]:
         assert analyst.get("skill_name") and analyst.get("analysis")
     # P1-C（2026-08-07）：降级（规则引擎）模式下无多空分歧可跳过辩论（0 轮）；
@@ -514,7 +514,7 @@ def test_status_pending_job(iso_dirs, monkeypatch):
             "pct": 10,
             "message": "取数中",
             "analysts_done": 0,
-            "analysts_total": 5,
+            "analysts_total": 6,
             "result": None,
             "error": None,
             "_created": 0.0,
@@ -554,7 +554,7 @@ def test_post_dedup_in_progress_job(fake_fetch, iso_dirs, monkeypatch):
             "pct": 10,
             "message": "取数中",
             "analysts_done": 0,
-            "analysts_total": 5,
+            "analysts_total": 6,
             "result": None,
             "error": None,
             "_created": 0.0,
@@ -708,7 +708,7 @@ def _make_job(jid: str, status: str, finished: float) -> dict:
         "pct": 100.0 if status == "done" else 20.0,
         "message": "完成" if status == "done" else "进行中",
         "analysts_done": 5,
-        "analysts_total": 5,
+        "analysts_total": 6,
         "result": None,
         "error": None,
         "_created": 0.0,

@@ -495,6 +495,7 @@ def test_settle_plans_no_plan_missing_quote_snapshot_at_cost(monkeypatch, data_d
     """无计划且持仓行情缺失：快照按成本价估值 + degraded 标注（绝不静默）。"""
     monkeypatch.setenv("STOCK_REVIEW_DATA_DIR", str(data_dir))
     import stock_review_crew.accounts.engine as engine_mod
+    import stock_review_crew.accounts.quotes as quotes_mod
     import stock_review_crew.accounts.storage as storage_mod
     import stock_review_crew.tools.stock_data as stock_data_mod
 
@@ -504,6 +505,8 @@ def test_settle_plans_no_plan_missing_quote_snapshot_at_cost(monkeypatch, data_d
         raise RuntimeError("主源不可用（模拟）")
 
     monkeypatch.setattr(stock_data_mod, "fetch_stock_info", boom)
+    # 2026-08-21 新增腾讯历史日K兜底：测试行情缺失需同时关闭该兜底
+    monkeypatch.setattr(quotes_mod, "_fetch_tx_history_quote", lambda code, date: None)
 
     # 手工构造已有账户：前一交易日买入 100 股 @10.00 冻结（T+1 未到期）
     acct = engine_mod.open_account("alang")

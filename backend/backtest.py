@@ -142,8 +142,9 @@ def _llm_degraded_notes(meta: dict) -> list[str]:
 
 
 def validate_run_product(date_str: str, meta_path: Optional[Path] = None,
-                         report_path: Optional[Path] = None,
-                         plan_p: Optional[Path] = None) -> tuple[bool, list[str]]:
+                          report_path: Optional[Path] = None,
+                          plan_p: Optional[Path] = None,
+                          allow_llm_degrade: bool = False) -> tuple[bool, list[str]]:
     """run 产物校验（对齐 work/review_batch.validate_run_product 口径）：
     report.json + plan.json 存在、meta.degraded 无「LLM 不可用/失败」「降级为规则引擎」。
 
@@ -171,7 +172,7 @@ def validate_run_product(date_str: str, meta_path: Optional[Path] = None,
     except Exception as exc:  # noqa: BLE001
         llm_notes = []
         reasons.append(f"meta 损坏（{exc}）")
-    if llm_notes:
+    if llm_notes and not allow_llm_degrade:
         reasons.append("LLM 降级：" + "；".join(llm_notes)[:200])
     return len(reasons) == 0, reasons
 
@@ -199,6 +200,7 @@ def _new_backtest(params: dict) -> dict:
         "days_done": 0,
         "current": None,
         "total_elapsed_ms": 0,
+        "accounts": None,
         "days": [
             {
                 "date": d,
@@ -316,6 +318,8 @@ def _run_one_day(bt: dict, day_index: int) -> None:
         _review_kw: dict[str, Any] = {}
         if params.get("lite"):
             _review_kw["lite"] = True
+        if params.get("analysts"):
+            _review_kw["analysts"] = params["analysts"]
         try:
             result = _run_review_day_impl(
                 date_str, params.get("mode", "close"),
@@ -346,7 +350,8 @@ def _run_one_day(bt: dict, day_index: int) -> None:
             continue
         review_ms = int((time.monotonic() - _t1) * 1000)
         # 校验产物（对齐 review_batch 口径）；不合格删记录重跑
-        ok, reasons = validate_run_product(date_str)
+        allow_llm_degrade = bool(params.get("allow_llm_degrade"))
+        ok, reasons = validate_run_product(date_str, allow_llm_degrade=allow_llm_degrade)
         if not ok:
             last_error = "；".join(reasons)
             retry_sleep_ms = int(RETRY_SLEEP * 1000) if attempt < max_attempts else 0
@@ -476,6 +481,12 @@ def _run_loop(bt: dict, start_idx: int = 0) -> None:
                     _persist_day_and_meta(bt)
                     return
             _run_one_day(bt, i)
+            if bt.get("_cancel"):
+                bt["status"] = "cancelled"
+                bt["finished_at"] = datetime.now().isoformat(timespec="seconds")
+                bt["current"] = {"date": bt["days"][i]["date"], "stage": "cancelled"}
+                _persist(bt)
+                return
             bt["days_done"] = sum(1 for d in bt["days"] if d["status"] == "done")
             bt["total_elapsed_ms"] = _total_run_ms(bt)
             bt["current"] = None
@@ -485,6 +496,11 @@ def _run_loop(bt: dict, start_idx: int = 0) -> None:
         bt["total_elapsed_ms"] = _total_run_ms(bt)
         bt["days_done"] = len(bt["days"])
         bt["current"] = None
+        # 2026-08-17：完成时保存各分析师账户摘要，便于跨回测对比表现
+        try:
+            bt["accounts"] = _account_summary(bt.get("params", {}).get("analysts"))
+        except Exception:  # noqa: BLE001 - 摘要失败不影响回测终态
+            bt["accounts"] = {}
         _persist(bt)
     except _BacktestStopped:
         # _run_one_day 已将 bt.status 置 error/cancelled 并落盘
@@ -525,6 +541,99 @@ def _reset_accounts() -> None:
                 shutil.rmtree(d, ignore_errors=True)
 
 
+def _account_summary(skill_ids: Optional[list[str]] = None) -> dict:
+    """读取当前 data/accounts/ 下各分析师账户，生成回测期末摘要。
+
+    用于在回测完成时随 manifest/progress 持久化，方便后续按区间对比
+    「每位分析师的期末资产/收益率/已实现盈亏/成交拒绝/最大回撤/胜率」。
+    账户缺失或损坏时跳过对应分析师，绝不抛异常。
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "src"))
+    try:
+        from stock_review_crew.accounts import engine as acct_engine
+        from stock_review_crew.accounts import storage as acct_storage
+    except Exception:  # noqa: BLE001 - 导入失败不阻断回测收尾
+        return {}
+    try:
+        from stock_review_crew.skills import list_skills
+        _skill_names = {str(s.get("id") or ""): str(s.get("name") or "") for s in list_skills()}
+    except Exception:  # noqa: BLE001 - 名称映射失败仅影响展示
+        _skill_names = {}
+
+
+    root = acct_storage.accounts_root()
+    if not root.is_dir():
+        return {}
+    out: dict[str, dict] = {}
+    dirs = [p for p in root.iterdir() if p.is_dir()]
+    if skill_ids:
+        sids_set = set(skill_ids)
+        dirs = [d for d in dirs if d.name in sids_set]
+    for d in sorted(dirs):
+        sid = str(d.name)
+        acct = acct_storage.load_account(sid)
+        if not isinstance(acct, dict):
+            continue
+        trades = acct_storage.load_trades(sid) or []
+        snaps = acct_storage.load_snapshots(sid) or []
+        acct["trades"] = trades
+        acct["snapshots"] = snaps
+        try:
+            initial = float(acct.get("initial_cash") or acct_storage.load_initial_cash())
+        except (TypeError, ValueError):
+            initial = 100_000.0
+        total_assets = acct.get("cash")
+        if isinstance(snaps, list) and snaps:
+            try:
+                total_assets = float(snaps[-1].get("total_assets") or total_assets)
+            except (TypeError, ValueError):
+                pass
+        try:
+            total_assets = float(total_assets or 0.0)
+        except (TypeError, ValueError):
+            total_assets = 0.0
+        realized_pnl = 0.0
+        try:
+            realized_pnl = float(acct.get("realized_pnl") or 0.0)
+        except (TypeError, ValueError):
+            realized_pnl = 0.0
+        filled = sum(1 for t in trades if t.get("status") == "成交")
+        rejected = sum(1 for t in trades if t.get("status") == "拒绝")
+        max_drawdown = 0.0
+        if isinstance(snaps, list):
+            peak = -1e18
+            for s in snaps:
+                try:
+                    v = float(s.get("total_assets") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                peak = max(peak, v)
+                if peak > 0:
+                    max_drawdown = max(max_drawdown, 1.0 - v / peak)
+        stats = {}
+        try:
+            stats = acct_engine.trade_stats(acct)
+        except Exception:  # noqa: BLE001 - 统计失败不影响摘要
+            stats = {}
+        out[sid] = {
+            "skill_id": sid,
+            "name": _skill_names.get(sid) or str(acct.get("skill_id") or sid),
+            "initial_cash": round(initial, 2),
+            "total_assets": round(total_assets, 2),
+            "return_rate": round(total_assets / initial - 1.0, 6) if initial else 0.0,
+            "realized_pnl": round(realized_pnl, 2),
+            "filled": filled,
+            "rejected": rejected,
+            "max_drawdown": round(max_drawdown, 6),
+            "win_rate": stats.get("win_rate"),
+            "profit_loss_ratio": stats.get("profit_loss_ratio"),
+            "avg_holding_days": stats.get("avg_holding_days"),
+        }
+    return out
+
+
 def start_backtest(params: dict) -> str:
     """启动一次回测：单 running 互斥 + 落盘 + 后台线程逐日。返回 backtest_id。"""
     start = _validate_date(params.get("start"))
@@ -542,6 +651,17 @@ def start_backtest(params: dict) -> str:
     force = bool(params.get("force"))
     # 快速模式（lite）：跳过主持人/报告 LLM，仅数据 + 分析师判断
     lite = bool(params.get("lite"))
+    # 可多选分析师：未传/空列表 = 全部交易型分析师
+    analysts = params.get("analysts")
+    if analysts is not None:
+        if not isinstance(analysts, list) or not all(isinstance(x, str) for x in analysts):
+            raise HTTPException(status_code=400, detail="analysts 必须为字符串数组")
+        from stock_review_crew.skills import list_skills
+        valid = {x.get("id") for x in list_skills()}
+        bad = [x for x in analysts if x not in valid]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"不存在的分析师 id：{', '.join(bad)}")
+        analysts = [x for x in analysts if x]
     days = trading_dates(start, end)
     if not days:
         raise HTTPException(status_code=400, detail=f"所选范围（{start} 至 {end}）内无交易日")
@@ -561,6 +681,7 @@ def start_backtest(params: dict) -> str:
         "lite": lite,
         "max_rounds": max_rounds,
         "mode": mode,
+        "analysts": analysts,
     }
     bt = _new_backtest(clean)
     try:
@@ -577,12 +698,19 @@ def cancel_backtest(bt_id: str) -> dict:
     with _lock:
         bt = BACKTESTS.get(bt_id)
     if bt is None:
-        # 可能已清出内存（重启丢失，断点续跑不做），容错
+        # 可能已清出内存（重启丢失）：尝试从磁盘重建，支持取消重启前遗留的 running 记录
+        try:
+            bt = _load_backtest_from_disk(bt_id)
+        except Exception:
+            bt = None
+    if bt is None:
         raise HTTPException(status_code=404, detail="回测不存在")
     if bt.get("status") in ("done", "error", "cancelled"):
         raise HTTPException(status_code=409, detail=f"回测已结束（{bt['status']}），无法取消")
     with _lock:
         bt["_cancel"] = True
+        # 取消后当日仍正常跑完，由 _run_loop 在日界把状态置为 cancelled（保持“当日完成后停”语义）
+        _persist(bt)
     return {"ok": True}
 
 
@@ -626,6 +754,7 @@ def _load_backtest_from_disk(bt_id: str) -> Optional[dict]:
         "days_done": int(data.get("days_done") or 0),
         "days_total": int(data.get("days_total") or len(data.get("days") or [])),
         "total_elapsed_ms": int(data.get("total_elapsed_ms") or 0),
+        "accounts": data.get("accounts"),
     }
     return bt
 

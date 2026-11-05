@@ -609,14 +609,16 @@
 
 2026-08-16 回测断点续跑（resume）+ 产物校验失败保留行情快照（requirements-backtest-resume）：
 1. **backend/backtest.py**：_run_loop(bt, start_idx=0) 循环从 start_idx 起步（续跑起点）；
-   新增 esume_backtest(bt_id)（单 running 互斥 409 / done 409 / 找首个非 done 日 / 重置该日起为
+   新增 
+esume_backtest(bt_id)（单 running 互斥 409 / done 409 / 找首个非 done 日 / 重置该日起为
    pending / status=running + finished_at=None + days_done 重算 / **不重置账户** / daemon 线程续跑；
    内存 BACKTESTS 优先，否则从 manifest+progress.json 磁盘重建）；_run_one_day 产物校验失败
    delete_review 改 keep_snapshot=True（防复发，好快照保留）。
 2. **backend/routes_backtest.py**：POST /api/backtest/{id}/resume → resume_backtest。
 3. **reviews.py**：delete_review(date, time=None, *, keep_snapshot=False)——True 时删整目录后
    恢复 market_data.json（保留行情快照），默认 False 删整份（回归既有）。
-4. **前端**：api.js esumeBacktest(id)；BacktestView.jsx HistoryList error/cancelled 项加
+4. **前端**：api.js 
+esumeBacktest(id)；BacktestView.jsx HistoryList error/cancelled 项加
    「续跑」小按钮（onResume，独立按钮不破坏整行 onClick），handleResume → resumeBacktest →
    getBacktest 快照 → beginPolling。
 5. **验证**：test_backtest + test_backtest_live_diag + test_storage_reviews == **70 passed / 0 failed**
@@ -624,3 +626,115 @@
    续跑全 done；delete_review keep_snapshot 快照仍在；前端 
 pm run build 通过（bundle 含 /resume、
    续跑/Ui）。H5 前端按钮 + build 通过。真实续跑 bb45（从 5-08）需用户确认后另跑。
+
+
+2026-08-16 分析师选股与交易模型打磨（基于 2026-04-01~08-14 最新回测）：
+1. **提示词**：`ANALYST_BASE_TEMPLATE` 新增「你的专属交易模型」区块 + 买入价纪律
+   （买入价必须严格低于涨停价，卖出价必须高于跌停价，修复回测中大量「目标价=涨停价被拒买」）；
+   `build_analyst_prompt` 增加 `trading_model` 入参；`build_account_block` 按 `skill_id` 注入专属兜底参数。
+2. **每位分析师交易模型**：`skills/*/skill.json` 新增 `trading_model` + `trading_params`，
+   并将 prompt 内系统兜底同步为：alang 趋势 -5%/+10%/13天；baxiaoxian -4%/+6%/3天；
+   bingchuan -5%/+8%/5天+回落4%；tiechui -4%/+6%/3天；yangjia -5%/+8%/3天；
+   同时收紧仓位/只数（单票≤2-3成、总仓≤5-7成、最多2-3只）。
+3. **撮合兜底**：`engine.ANALYST_TRADING_DEFAULTS` + `apply_analyst_conditional_defaults`，
+   `replay.py` 改为按 `skill_id` 取专属默认，显式字段仍优先。
+4. **UI 主题**：styles.css 主强调色从紫改为 A 股复盘红（#c8423c），品牌标/侧栏按钮/回测图同步；
+   index.html theme-color 改红。
+5. **文档**：`docs/requirements-trading-v1.md` 新增 §七 分析师专属交易模型表。
+6. **验证**：待跑全量 pytest / regression.py（交付前补跑）。
+
+
+2026-08-16 已保存优化前回测基线：`backups/backtest_baseline_20260816/`
+- manifest.json：当前回测 ID + 各分析师期末账户快照；
+- compare_baseline.py：下次重跑后自动对比收益率/总资产/已实现盈亏/成交拒绝/最大回撤；
+  已支持区间对比：`--start 2026-08-01 --end 2026-08-14`（默认旧基线目录
+  `backups/snapshot-20260815-103351/data/accounts`）。
+
+
+2026-08-16 模拟下单卖出方向 BUG 修复（用户实测：爱在冰川/国电南瑞卖出 target=24.97 > 当日 high=24.90 被误拒）：
+- 修复：`engine.place_order` 卖出 target>high 不再拒绝，按“开盘即卖出”处理，成交价=开盘价（开盘价缺失用最低价兜底）；
+- 同步：`docs/requirements-order-fill-direction.md` G4 改为成交；`tests/test_accounts_engine.py::test_g4_sell_target_above_high_fills_at_open`；
+  `prompts.py` A 股规则铁律文案更新。
+- 排查：全项目仅 `engine.place_order` 存在该对称误拒；条件单 gap 逻辑已按开盘价处理，无需重复修复。
+
+
+2026-08-17 回测表现分析 + 分析师提示词回测纪律 + 回测账户摘要持久化：
+- 基于最近回测与交易明细（含 4-08 全量基线、5 月逐笔、work/replay_result.json 涨停价拒买）：
+  - 阿狼：全量基线最佳（+4.86%），但 5 月单日同时铺 3 只“打野”且全部次日止损，回测改进=单日新建≤2只/同板块≤1只/连续未成交放弃/止损后降仓；
+  - 拔小弦：5 月 -2.34% 相对稳健，但大量低吸挂单远低于次日低点导致拒买，改进=贴近 5/10 日线真实支撑、止损后当日不开新仓；
+  - 爱在冰川：5 月 +0.09% 唯一正收益，但大赚后仍买低价 2 板并大额止损，改进=大赚后次日降仓/退潮尾段不买低价 2 板；
+  - 铁锤：5 月 -6.41%，多次“未触及目标价”+止损后重复卖同股，改进=确认不足空仓、买入价贴近关键承接、止损后等新确认；
+  - 炒股养家：5 月 -4.65%，有移动止盈盈利但被后续重仓亏损吞掉，改进=止盈后不立即同等仓位追新、退潮只用试错仓。
+- `prompts.py` ANALYST_BASE_TEMPLATE 新增通用「回测纪律」；5 份 `skills/*/skill.json` trading_model 追加各自回测改进。
+- `backend/backtest.py` 回测完成时保存 `accounts` 摘要（期末资产/收益率/已实现盈亏/成交拒绝/最大回撤/胜率/盈亏比/平均持仓），`progress.json` 持久化；前端 BacktestView 新增「回测期末账户摘要」表。
+- 文档：requirements-trading-v1 七表与 skill.json 对齐 + 新增回测纪律说明；requirements-backtest-ui 数据模型补 accounts 字段；测试补 accounts 字段断言。
+
+
+2026-08-17 根目录 npm 代理修复：
+- 用户反馈 `npm error ENOENT ... H:\stock_review_crew\package.json`：此前前端 package.json 在 `frontend/`，根目录直接 `npm run build` 会找不到 package.json。
+- 新增根目录 `package.json`，将 `dev/build/preview/verify:normalize` 代理到 `frontend/`，根目录 `npm run build` 可正常执行。
+- README 同步更新：开发/构建命令可直接在根目录执行。
+
+
+2026-08-17 八项体验优化（用户反馈）：
+1. 市场天气加入涨跌分布区间评分：Tushare 全市场分布新增 0-3/3-5/5-7/7-10/>10 涨跌对称细分区；compute_market_weather 按区间数量加权评分，保留旧键兼容。
+2. 风格坐标灵敏度放大：_dim_score 由 1pp=2 分提升为 1pp=10 分，小差异更可辨。
+3. 今日数据额外指数新增「同花顺全A（880011）」，放在平均股价后，一行 4 个；CSS 改 repeat(4,1fr)。
+4. 复盘降级标注收敛：_dict_to_md 跳过 degraded/degraded_reason 元数据；_block_md 仅在全链路数据缺失时展示降级说明，主源失败备用源成功不再标为降级。
+5. 复盘报告目录（左侧 TOC/返回顶部）移除，报告卡片全宽展示。
+6. 模拟账户列表改为表格展示，新增「平均仓位」字段（快照 position_mv/total_assets 均值）。
+7. 收益率曲线改用账户实际 initial_cash 计算，避免修改初始资金后曲线起点错误；账户概览由卡片改为单行文本展示并优化颜色。
+8. 分析师提示词从设置页拆分为独立页面 SkillPromptsView，使用 Markdown 预览 + 可编辑保存；侧栏新增「分析师提示词」入口，设置页保留跳转按钮。
+验证：全量 pytest 828 passed / 52 skipped；npm run build 通过；后端已重启加载新代码；公网隧道仍可用。
+
+2026-08-17 监管异动·单股计算（首版）：
+- 新增 src/stock_review_crew/tools/anomaly.py：3/10/30 日偏离 + 同向计数 + 未来模拟；口径=主板3日±20%/创业板科创±30%/10日+100-50%/30日+200-70%/10日同向≥4。
+- 新增 backend/routes_anomaly.py：GET /api/anomaly/stock?code=&days=（6位代码/1-10天）。
+- 前端 AnomalyView.jsx（监管异动·单股计算：搜索/指标卡/预警/未来模拟/30日明细）+ 侧栏入口 + App 路由。
+- 新增 tests/test_anomaly.py（离线 3 用例）。全量 pytest 830 passed（1 个既有 quotes_cache 网络用例失败，与本功能无关）；npm run build 通过；后端已重启，实盘接口 600664 返回正常。
+
+2026-08-19 监管异动·对齐参考图（盘中快照口径）：
+- 定位：参考图（yidong.jpg @11:30）是盘中 11:23 截图——600664 现价 9.02、上证A股 4101.83，故 3日1.87/10日44.70/30日197.85；而收盘日K已是 9.06/4083.28，导致数值漂移。
+- 修复：新增 `_realtime_quote`/`_apply_realtime_snapshot`，查询时用腾讯实时现价替换当日日K收盘价（仅当日、仅当有盘中/收盘实时价；收盘后实时价=收盘价无副作用），使盘中查询与参考图 1:1 对齐。
+- 修复腾讯日K在后端失效：`_records_from_tx_kline`/`_minute_bars_from_tx` 加 `proxies={"http":None,"https":None}`，避开未启动的本机代理，后端现稳定走“腾讯日K”（/api/anomaly sources=腾讯日K）。
+- 新增历史口径：`/api/anomaly/stock?code=&days=&date=YYYY-MM-DD` 支持 as-of 截断（不叠实时快照），便于核对历史上某日的官方偏离值。
+- 补充 tests/test_anomaly.py：新增 as-of date 用例（4 passed，离线）；后端已重启验证。
+
+2026-08-19 监管异动·对齐“开盘啦”异动提示（kaipanla_yidong.jpg）：
+- 参考图给出 6 只股的目标窗口与“触发异动涨幅”（当日涨跌幅临界值）：600664(30日200%→-0.53%)、600272(10日100%→2.65%)、300534(30日200%→10.47%)、603221(复牌10日同向→7.06%)、301282(10日100%→16.13%)、688296(10日100%→11.40%)。
+- 口径确认：触发异动涨幅 = 使“区间最大累计偏离(复利)”达到阈值所需的当日涨跌幅（600664 与参考逐点一致 -0.53）。
+- 板块基准修正：科创板 688/689 由“上证A股指数”改为“科创50指数(sh000688)”；创业板 300/301 由“深证A股指数”改为“创业板综指(sz399102)”。对齐后：600664 -0.53/ref-0.53、600272 2.67/2.65、301282 16.05/16.13、688296 11.2/11.4 高度吻合；300534 9.83/10.47 略偏（疑为数据源收盘价差异）。
+- 603221 属“复牌10日同向”特殊规则：引擎已按 10 日同向≥4 标注 severe（当前同向 5 次），参考图 7.06% 为复牌窗口内模拟触发涨幅，非通用偏离。
+- 说明：证监会/交易所历史规则检索因本环境 web_search 余额不足无法在线拉取，以上阈值沿用既有定稿口径（主板3日±20/创业板科创±30/10日+100-50/30日+200-70/10日同向≥4）。
+- 后端已重启：/api/anomaly 现对 688 用科创50、对 300/301 用创业综指，数据源=腾讯日K。
+- 涨跌幅显示精度修复（全面排查）：`anomaly.py:392/394` 的 `stock_pct`/`index_pct` 本应为小数，原 `round(...,2)` 会把 -0.04961 压成 -0.05 再被前端×100 显示成 -5.00%（实际 -4.96%）。已改 `round(...,4)`。排查确认：偏离值/触发价内部全部用 6 位小数（`_pct`@210、`dev`@226、`_rolling_sum`@248、`_max_cum_dev`@260），2 位小数仅用于返回/展示字段（windows/daily/simulation，327-379 行），故**该 bug 不影响任何偏离值或触发价计算**，仅影响日涨跌幅展示。
+- 触发价保留精度：`anomaly.py:334/335` 的 `trigger_up_price/trigger_down_price` 由 `round(...,2)` 改为 `round(...,4)`，避免过早 2 位舍入。600664 收盘后触发价=9.0717（显示 9.07）；参考图 9.08 对应 11:23 盘中快照（close 9.02 / max30 197.87 → raw 9.0846 → 9.08），盘中实时口径可复现。
+- 沪主板基准指数修正：用户指出今日“上证指数”收盘应为 3894.42，此前误用“上证A股指数(sh000002)=4083.28”。已将 `anomaly.py` 沪主板(60) 基准由 sh000002 改为 **上证指数 sh000001**（000001，收盘 3894.42，当日 -2.40%）。600664 现 idx_name=上证指数，30d max=199.60，触发价=9.0721。
+2026-08-21 新分析师「大A仙尊」+ 复盘分析师多选：
+- 新增 skills/daxianzun/skill.json：基于《日总结分类_去重_20260821051839.md》108 篇日总结提炼的超短题材轮动低吸模型；止损 -7%、止盈 +10% 后回落 5% 移动止盈、未到 +10% 按个股强度判断、不买 ST/微盘股/次新股/新股；id=daxianzun，group=sentiment。
+- src/stock_review_crew/chat.py DEFAULT_ANALYST_IDS 增加 daxianzun；frontend/src/mock.js ANALYSTS 增加大A仙尊。
+- 复盘支持选择分析师（可多选）：POST /api/reviews 新增可选 analysts[]；graph.build_graph 新增 analysts 参数，_run_analysts 按 selected 过滤；Sidebar「补做复盘」增加分析师多选；不传 analysts 默认全部交易型分析师。
+- 同步更新测试 5→6 位分析师（test_graph/test_analysts_merge/test_backend/test_r11_reviews/test_r15_acceptance/test_backtest_live_diag），相关子集通过；前端 npm run build 通过。
+- 按用户要求，所有复盘入口均支持分析师多选：①侧栏「补做复盘」；②ReviewTab 新增「手动生成复盘（可选分析师）」；③BacktestView 新增「选择参与回测的分析师（可多选）」。后端：POST /api/reviews 与 POST /api/backtest/start 均支持 analysts[] 并按 skills 白名单校验；回测 _run_loop 将 analysts 传入 run_review_day。前端 build 通过；后端已重启并验证无效分析师返回 400。
+- 分析师多选升级为统一 MultiSelect 下拉组件（frontend/src/components/MultiSelect.jsx）：回测/侧栏补做复盘/ReviewTab 手动复盘均使用该组件，显示已选人数/支持全选/点击外部关闭；前端 build 通过。
+- 修复回测分析师未生效：根因是 `frontend/src/api.js` 的 `startBacktest` 重新构造请求体时漏了 `analysts` 字段，导致后端 manifest 中 `analysts: null`、仍跑全部分析师。已补 `analysts: payload && payload.analysts`；重新 build 后生效。
+- 修复回测取消无效：`cancel_backtest` 现在置 `_cancel` 后立即将内存状态置为 `cancelled` 并落盘（后台当日仍在收尾但界面即时停止）；`_run_loop` 在每天结束后也检查 `_cancel` 并直接返回取消，不再覆盖成 done。后端已重启。
+- 修复分析师阶段“跑很久不出结果/不报错”：根因是 `ThreadPoolExecutor` 的 `with` 语法在 `as_completed(timeout)` 超时后仍会 `shutdown(wait=True)` 等待挂死的 LLM 线程，导致整个回测卡住。已改为显式 `pool.shutdown(wait=False)`，超时后立即用规则引擎兜底继续后续流程；后端已重启。用户触发的卡死回测 bt_20260821_143117_115d 已取消（cancelled）。
+- 修复“取消回测报回测不存在”：`cancel_backtest` 在内存找不到时改为从磁盘 `_load_backtest_from_disk` 重建，支持取消重启前遗留的 running 记录；若磁盘也已是终态则返回 409 中文提示。已重启验证，并取消当前卡死的 bt_20260821_144151_31a7。
+- 反复卡在“分析师 大A仙尊 开始”：为降低等待时间，`llm_runtime.py` 单次 LLM 硬超时 200s→90s，`graph.py` 分析师批超时 300s→150s；超时后立即规则引擎兜底，避免每次卡 3-5 分钟。已重启。
+- 分析“常失败”根因：`validate_run_product` 把「分析师 LLM 降级为规则引擎」也判为产物不合格，导致 lite 回测在 LLM 慢/挂起时反复重试 3 次后整体 error。已改：lite 或 `allow_llm_degrade=true` 时，LLM 降级结果视为成功（仍保留降级标注），避免回测因 LLM 降级整段失败；已重启生效。当前旧回测 bt_20260821_145847_2190 已 error（5/10 天），新回测将受益。
+- 修正：回测默认/lite 不再把「LLM 降级为规则引擎」视为成功（避免假回测）；仅显式 allow_llm_degrade=true 才放宽。同时恢复 LLM 单次超时 200s、分析师批超时 300s，减少因超时过短导致的误降级/误失败。已重启。
+- 严重修复（撮合行情日期错位）：`fetch_stock_info` 的 Tushare/东财实现原用“截至 date 的最后一行”而非“date 当日行”，导致 08-21 撮合 300142 时拿到旧日 OHLC（low=12.99），错误成交 15.00（真实 08-21 low=15.30/close=16.10）。已改：Tushare/东财必须精确匹配 date 当日，否则报错；`accounts/quotes.py` 增加 `_fetch_tx_history_quote` 用腾讯历史日K精确取 date OHLC，并在主源日期不匹配时回退；已删 8 月 quotes_cache 强制重取。需重跑回测得到正确撮合。
+
+- 业务逻辑对齐：回测账户摘要 `_account_summary` 原先把全部 6 位分析师都列进摘要，即使只选了 1 位。已改为只按 `params.analysts` 过滤输出所选分析师摘要；未指定则全部。另确认 initial_cash 为可持久化设置（data/settings/accounts.json 现为 200000，默认 100000），属可配置项非 bug。
+
+
+
+
+
+> 2026-08-29 涨停复盘工作台交付（docs/开发计划-涨停复盘辅助.md，D1-D14 已确认）：
+> - 新增：tools/kaipanla_api.py（开盘啦 AppAPI 免登录主源）、tools/zt_tracking.py（全量涨停池/过滤/标签/席位/题材/板块聚类/单日流水线）、
+>   zt_analysis.py（轮动池/池生命周期 follow/核心股/收盘介入信号/待填CSV）、storage/zt_tracking.py（data/zt_tracking 落盘）、
+>   work/zt_tracking.py（手动触发 CLI）、backend/routes_zt.py（/api/data/zt-tracking/*）、frontend ZTReviewTab（新 Tab 涨停复盘，v0.2 设计稿）；
+> - 回填最近 10 个交易日（2026-08-14~08-28）；待人工补充 CSV：data/zt_tracking/pending_manual/；
+> - pytest 823 passed（9 个环境性失败：真实网络/tdxpy 已装使降级链测试备用源成功，与涨停模块无关）。

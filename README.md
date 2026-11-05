@@ -32,7 +32,8 @@ H:\stock_review_crew\.venv\Scripts\python.exe -m uvicorn backend.main:app --host
 ```
 
 打开 http://127.0.0.1:8501（端口统一为 8501，与 `AGENTS.md` 一致）。
-开发前端：`cd frontend; npm run dev`（无后端时自动降级 mock）。
+开发前端：`npm run dev`（根目录已代理到 `frontend`，无后端时自动降级 mock）；
+前端构建：`npm run build`（根目录执行即可）。
 
 ## 测试与冒烟
 

@@ -29,6 +29,8 @@
   "days_total": 33, "days_done": 10,
   "current": {"date": "2026-07-14", "stage": "analysts"},
   "total_elapsed_ms": 1234567,
+    "accounts": null, // done 后为 {skill_id: {total_assets, return_rate, realized_pnl, filled, rejected, max_drawdown, win_rate, ...}}，进行中为 null
+
   "days": [
     {
       "date": "2026-07-14",

@@ -182,6 +182,15 @@ ANALYST_BASE_TEMPLATE = """复盘日期: {date}
 ## 你的交易风格（本次复盘必须严格按此风格思考与输出，禁止泛泛而谈的大盘评论）
 {style_anchor}
 
+## 你的专属交易模型（基于最新回测打磨，止盈止损/买入卖出按此执行）
+{trading_model}
+
+## 回测纪律（通用，违反会显著拖累回测表现）
+- **单日新建买入最多 2 只**，同一板块/同一逻辑只选 1 只；非退潮期也不得同日铺 3 只以上。
+- 买入价必须落在“次日大概率触及”的区间：参考今日收盘/5日线/10日线支撑，禁止为了等更低而挂远离现价的低价单；同一标的连续 2 个交易日未成交，应放弃或改为贴近当日低点。
+- 卖出前必须调用 get_positions；同一持仓同一天只允许一个卖出计划；已清仓/已止损的股票不得再输出卖出计划。
+- 若上一笔已止损，下一笔必须降仓或暂停，禁止立刻用同等仓位追同板块同逻辑。
+
 今日A股市场数据如下（缺失项会明确标注「无数据」，禁止臆测或编造）：
 {market_data}
 
@@ -226,10 +235,11 @@ ANALYST_BASE_TEMPLATE = """复盘日期: {date}
    - 002379：买入价21.34元，仓位2成  ← 禁止买入不写原因
    - 参考买入价183.50-185.00元，2-3成  ← 禁止区间与模糊仓位
 **不要附加任何条件**（不写"若""突破""回踩"等）。
+**买入价纪律（最新回测修正）**：买入价必须**严格低于当日涨停价**且**不低于当日跌停价**，禁止把买入价设成涨停价/高于涨停价或低于跌停价（系统会拒买）；若目标股今日已涨停/一字/接近涨停，应放弃或等次日回踩，不在涨停板上挂单。卖出价必须**严格高于当日跌停价**且**不高于当日涨停价**，禁止设成跌停价/高于涨停价。
 如果没有推荐，只写一个字：无。（推荐行不计入字数）
 
 ## 输出铁律（违反将导致分析被丢弃或下单失败）
-1. 只写 6 位股票代码，禁止写股票名称；不选 ST、退市、北证（8 开头）股。
+1. 只写 6 位股票代码，禁止写股票名称；不选 ST/*ST、退市、北证（8 开头）、新股（简称 N/C 开头）、次新股（上市未满一年）股。
 2. 推荐股票前必须先调用 get_stock_info 查询真实数据；未查就写"需要查询XX股票数据，暂无法给出建议"。
 3. 数据缺失/无法查询 → 明确写"数据不足，无法判断"；绝对禁止编造代码、价格、均线、走势、交易记录。
 4. A股 T+1：今天买入明天才能卖，推荐必须符合 T+1；看空/无把握 → 推荐写「无」。
@@ -240,8 +250,9 @@ ANALYST_BASE_TEMPLATE = """复盘日期: {date}
    - search_history: 搜索历史复盘记录，query=搜索关键词（如"上次跌破3400的判断"）"""
 
 
-def build_analyst_prompt(state, group="trend", trend_context="", style_anchor=""):
-    """组装分析师基础提示词（含昨日/更早复盘对照与防编造规则）。"""
+def build_analyst_prompt(state, group="trend", trend_context="", style_anchor="",
+                         trading_model=""):
+    """组装分析师基础提示词（含昨日/更早复盘对照、专属交易模型与防编造规则）。"""
     info = mode_info(state.get("mode"))
     yesterday = (state.get("yesterday_report") or "").strip()
     earlier = (state.get("earlier_today") or "").strip()
@@ -274,10 +285,43 @@ def build_analyst_prompt(state, group="trend", trend_context="", style_anchor=""
         sec3=info["analyst_titles"][2],
         state_date=state.get("date") or "",
         style_anchor=style_anchor or "通用A股短线/波段复盘风格：看指数定方向、看情绪定攻守、看主线选标的，知行合一控制仓位。",
+        trading_model=trading_model or "按你的交易风格执行；若未显式写止损/止盈/持有天数，系统按引擎默认兜底。",
     )
 
 
-def build_account_block(acct: dict, date: str = "") -> str:
+def _trading_param_text(skill_id: str) -> str:
+    """从 skills/{id}/skill.json 的 trading_params 生成中文兜底参数说明；
+    读不到/未配置返回空串（调用方回退通用默认）。"""
+    if not skill_id:
+        return ""
+    try:
+        data = load_skill(skill_id)
+        p = (data or {}).get("trading_params") or {}
+        if not p:
+            return ""
+        sl = float(p.get("stop_loss_rate", 0.95))
+        tp = float(p.get("take_profit_rate", 1.10))
+        mh = int(p.get("max_hold_days", 13))
+        parts = [
+            f"止损 -{(1.0 - sl) * 100:.0f}%（买入价×{sl:.2f}）",
+            f"止盈 +{(tp - 1.0) * 100:.0f}%（买入价×{tp:.2f}）",
+            f"持有 {mh} 天",
+        ]
+        tdd = p.get("trailing_drawdown")
+        if tdd is not None:
+            parts.append(f"移动止盈回落 {float(tdd) * 100:.0f}%")
+        mp = p.get("max_position_cheng")
+        mt = p.get("max_total_cheng")
+        mpos = p.get("max_positions")
+        if mp is not None and mt is not None:
+              parts.append(f"单票≤{float(mp):.0f}成/总仓≤{float(mt):.0f}成"
+                           + (f"/≤{int(mpos)}只" if mpos is not None else ""))
+        return "；".join(parts)
+    except Exception:  # noqa: BLE001 - 参数说明失败不阻塞
+        return ""
+
+
+def build_account_block(acct: dict, date: str = "", skill_id: str = "") -> str:
     """R12 分析师模拟账户状态区块（注入分析师提示词）：
     现金/持仓/T+1 冻结 + A 股规则铁律（涨跌停/100 股整数倍/费用/文本格式输出约定）。
     acct 为账户 dict（engine.open_account 结构，含 trades 历史）。
@@ -286,8 +330,20 @@ def build_account_block(acct: dict, date: str = "") -> str:
         return ""
     cash = acct.get("cash", 0.0)
     positions = acct.get("positions") or {}
+    trading_param_text = _trading_param_text(skill_id)
+    default_hint = (
+        f"（你的专属兜底参数：{trading_param_text}）" if trading_param_text
+        else "（缺省引擎按 买入价×0.95/×1.10/13天 处理）"
+    )
+    _initial = acct.get("initial_cash")
+    if not _initial:
+        try:
+            from .accounts.engine import initial_cash
+            _initial = initial_cash()
+        except Exception:  # noqa: BLE001 - 读取设置失败按 10 万兜底
+            _initial = 100_000.0
     lines = [
-        f"## 模拟账户状态（初始资金 10 万；每笔交易真实记录并计算盈亏）",
+        f"## 模拟账户状态（初始资金 {_initial:,.0f} 元；每笔交易真实记录并计算盈亏）",
         f"当前现金：{cash:,.2f} 元",
         "当前持仓：",
     ]
@@ -320,13 +376,17 @@ def build_account_block(acct: dict, date: str = "") -> str:
         "### 第二步：买入计划（成数式）",
         "- 每只买入推荐统一用**成数式**输出（系统在撮合时自动折算股数）：",
         "  `买入 代码：买入价XX.XX元，仓位X成，止损XX.XX元，止盈XX.XX元，持有X天，原因是XXX`",
+          "- **仓位按你的交易模型写，非退潮期严禁只写 1-2 成**：趋势/情绪派主升确认直接写 4-5 成，"
+          "超短派确认后直接写 3 成；只有退潮/无主线/无把握才降仓或空仓；",
         "- **止损/止盈/持有天数为必填**，但**只是系统兜底价位**：你每天仍要主动判断，走弱就主动写「卖出」止损、到位就主动写「卖出」止盈，"
-        "不要等系统兜底；止损/止盈/持有天数只是防止你没执行时的强制兜底（缺省引擎按 买入价×0.95/×1.10/13天 处理）；",
+        f"不要等系统兜底；止损/止盈/持有天数只是防止你没执行时的强制兜底{default_hint}；",
+          
+             
         "- **买入必须写一句基于真实数据的原因**"
         "（如 `买入 002172：买入价3.90元，仓位1成，原因是医疗服务2板龙头、医药主线净流入43亿`）；",
         "- 卖出统一用：`卖出 代码：卖出价XX.XX元，仓位X成`（卖出无需写原因）；",
         "- **只写 6 位股票代码，禁止写股票名称**（代码与名称不匹配会下单失败）；",
-        "- 系统结算时按 A 股规则自动折算股数：科创板 688/689 最低 200 股起、"
+        "- 系统结算时按 A 股规则自动折算股数：科创板 688/689 最低 200 股起、超过 200 股可按 1 股递增；"
         "其余 100 股整数倍；买入总金额不得超过当前现金；",
         "- 买入总金额（股数×目标价+费用）不得超过当前现金；",
         "- 不得裸卖空；T+1：当日买入的次日才能卖；",
@@ -338,13 +398,14 @@ def build_account_block(acct: dict, date: str = "") -> str:
         "卖出 000967：卖出价12.50元，卖出200股",
         "",
         "买入计划：",
-        "买入 002384：买入价189.00元，仓位2成，止损179.55元，止盈207.90元，持有13天，原因是苹果链龙头、机构净买入居前",
+        "买入 002384：买入价189.00元，仓位3成，止损179.55元，止盈207.90元，持有13天，原因是苹果链龙头、机构净买入居前",
         "```",
         "",
         "## A 股规则铁律（必须严格遵守，违反会下单失败）",
         "- T+1：当日买入的股票当日不可卖出；",
-        "- 涨跌停：目标价 ≥ 涨停价不可买入；目标价 ≤ 跌停价不可卖出；"
-        "当日价格未触发目标价不成交（买入：现价高于目标价未触发；卖出：现价低于目标价未触发）；",
+          "- 禁止交易：ST/*ST、新股（简称 N/C 开头）、次新股（上市未满一年）、退市/北证（8 开头）股；",
+        "- 涨跌停：目标价 ≥ 涨停价或 < 跌停价不可买入；目标价 ≤ 跌停价或 > 涨停价不可卖出；"
+        "当日价格未触发目标价时：买入现价高于目标价未触发；卖出现价低于目标价时按开盘价触发卖出（开盘价缺失按最低价兜底）；",
         "- 费用：佣金 万2.5（最低 5 元）、过户费 0.001%（双向）、印花税 卖出 0.05%；",
         "- 你只需按上述格式输出文本（每行一只、只写股票代码），系统会自动读取并记录计划；"
         "卖出前用 get_positions 确认可卖数量。",

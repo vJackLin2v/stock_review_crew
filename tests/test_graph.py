@@ -299,10 +299,10 @@ def test_full_flow_with_mock_llm(fetch_mode):
     """全流程（LLM mock 可用）：分析/主持人/报告节点均走 LLM 路径，数据无降级。"""
     fetch_mode(lambda mode, date: _fake_data())
     state = _invoke()
-    assert len(state["analyses"]) == 5
+    assert len(state["analyses"]) == 6
     groups = [a["group"] for a in state["analyses"]]
     assert groups.count("trend") == 2
-    assert groups.count("sentiment") == 3
+    assert groups.count("sentiment") == 4
     assert state["degraded"] is False
     assert not state["degraded_notes"]
     assert "仅供参考，不构成投资建议" in state["final_report"]
@@ -421,7 +421,7 @@ def test_progress_stages_monotonic(fetch_mode, monkeypatch):
     assert pcts[-1] == 100.0
 
     msgs = "|".join(m for _, _, m in events)
-    assert "分析师 1/5" in msgs and "分析师 5/5" in msgs
+    assert "分析师 1/6" in msgs and "分析师 6/6" in msgs
     assert "主持人判断" in msgs and "报告生成" in msgs and "复盘完成" in msgs
 
 

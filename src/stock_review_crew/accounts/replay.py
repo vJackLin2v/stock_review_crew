@@ -136,14 +136,17 @@ def _load_plan_file(date_str: str) -> tuple[list[dict], str]:
         return [], f"{date_str} plan.json 解析失败：{exc}"
 
 
-def _limit_pct(code: str) -> Optional[float]:
-    """涨跌幅系数（与 engine 口径一致）：科创板/创业板 ±20%，主板 ±10%，其余不支持。"""
+def _limit_pct(code: str, name: str = "") -> Optional[float]:
+    """涨跌幅系数（与 engine 口径一致）：科创板/创业板 ±20%，主板普通 ±10%、
+    主板 ST/*ST ±5%，其余不支持。"""
     c = str(code or "")
     if c.startswith(("8", "4", "92")):
         return None
     if c.startswith(("688", "689", "300", "301")):
         return 0.20
     if c.startswith(("0", "6")):
+        if "ST" in str(name or "").upper():
+            return 0.05
         return 0.10
     return None
 
@@ -297,13 +300,18 @@ class AssertionChecker:
                                f"日初持仓 {start_holdings[code]} + 当日买入"
                                f" {bought_today[code]}",
                         order_desc=f"{code} sell {qty}"))
-            if side == "buy" and qty % 100 != 0:
-                violations.append(Violation(
-                    date=day, skill_id=skill_id, rule="非整百",
-                    detail=f"{code} 买入 {qty} 非整百（买入数量须为 100 整数倍）",
-                    order_desc=f"{code} buy {qty}"))
+            if side == "buy":
+                # A股：主板/创业板买入须 100 股整数倍；科创板 200 股起、1 股递增
+                _min_qty = 200 if code.startswith(("688", "689")) else 100
+                if (code.startswith(("688", "689")) and qty < _min_qty) or \
+                   (not code.startswith(("688", "689")) and qty % 100 != 0):
+                    violations.append(Violation(
+                        date=day, skill_id=skill_id, rule="非整百",
+                        detail=f"{code} 买入 {qty} 股不符合最小申报单位"
+                               f"（主板/创业板 100 股整数倍；科创板 200 股起）",
+                        order_desc=f"{code} buy {qty}"))
             if q is not None and q.get("pre_close") is not None:
-                pct = _limit_pct(code)
+                pct = _limit_pct(code, q.get("name") or "")
                 if pct is not None:
                     limit_up, limit_down = acct_engine.limit_prices(
                         float(q["pre_close"]), pct)
@@ -342,7 +350,12 @@ def compute_summary(skill_id: str, acct: dict, name: str = "") -> AnalystSummary
     snaps = acct.get("snapshots") or []
     if snaps:
         summary.final_assets = float(snaps[-1]["total_assets"])
-        summary.return_rate = summary.final_assets / INITIAL_CASH - 1.0
+        init = acct.get("initial_cash")
+        if not init:
+            # 兼容旧账户：用首个结算日总资产近似期初资金
+            init = float(snaps[0]["total_assets"]) if snaps[0].get("total_assets") \
+                else acct_engine.INITIAL_CASH
+        summary.return_rate = summary.final_assets / float(init) - 1.0
         peak = -1e18
         mdd = 0.0
         for s in snaps:
@@ -606,10 +619,11 @@ def run_replay(start: Optional[str] = None, end: Optional[str] = None,
             except (TypeError, ValueError):
                 qty = 0
             acct = accounts[str(plan.get("skill_id") or "unknown")]
-            # 买入计划条件单三字段缺省 → 引擎默认（§三）；trailing_drawdown 透传（§六）
+            # 买入计划条件单三字段缺省 → 分析师专属模型（§三 + 2026-08-16 个性化）；
+            # trailing_drawdown 透传（§六）
             conditional = None
             if side == "buy" and target > 0:
-                conditional = acct_engine.apply_conditional_defaults(
+                conditional = acct_engine.apply_analyst_conditional_defaults(
                     {
                         "stop_loss": plan.get("stop_loss"),
                         "take_profit": plan.get("take_profit"),
@@ -617,6 +631,7 @@ def run_replay(start: Optional[str] = None, end: Optional[str] = None,
                         "trailing_drawdown": plan.get("trailing_drawdown"),
                     },
                     target,
+                    skill_id=plan.get("skill_id"),
                 )
             if qty > 0:
                 # 计划显式给出股数（qty）时优先于仓位成数折算（A4 契约）
@@ -841,11 +856,11 @@ def settle_plans(rec_date: str, settle_date: str,
         except (TypeError, ValueError):
             qty = 0
         acct = accounts[str(p.get("skill_id") or "unknown")]
-        # 买入计划条件单三字段：缺省按引擎默认（买入价×0.95 / ×1.10 / 13）补齐（§三）；
+        # 买入计划条件单三字段：缺省按分析师专属交易模型补齐（§七）；
         # trailing_drawdown 透传（§六）
         conditional = None
         if side == "buy" and target > 0:
-            conditional = acct_engine.apply_conditional_defaults(
+            conditional = acct_engine.apply_analyst_conditional_defaults(
                 {
                     "stop_loss": p.get("stop_loss"),
                     "take_profit": p.get("take_profit"),
@@ -853,6 +868,7 @@ def settle_plans(rec_date: str, settle_date: str,
                     "trailing_drawdown": p.get("trailing_drawdown"),
                 },
                 target,
+                  skill_id=p.get("skill_id"),
             )
         result = acct_engine.place_order(
             acct, code, name, side, target, cheng, day_quote,

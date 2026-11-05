@@ -443,14 +443,40 @@ def compute_market_weather(blocks: dict) -> dict:
             out["emotion_score"] = None
             out["emotion_label"] = None
         else:
-            # 深度下跌扣分（R17 敏感度增强）：同样涨跌家数比下，跌幅越深情绪越差。
-            # 从 breadth.distribution 取细分下跌档位，拿不到按 0，绝不抛异常。
             distribution = breadth.get("distribution") \
                 if isinstance(breadth.get("distribution"), dict) else {}
-            d57 = _i(distribution.get("跌5%-7%")) or 0
-            d7 = _i(distribution.get("跌7%以上")) or 0
-            if d57 or d7:
-                total -= int(round(d57 / 100.0 * 5 + d7 / 100.0 * 10))
+            # 涨跌分布区间评分（2026-08-17）：按每个区间的股票数量加权。
+            # 涨得越深/跌得越深权重越大；拿不到分布明细时按 0，绝不抛异常。
+            up_weights = [
+                ("涨0%-3%", 1), ("涨3%-5%", 2), ("涨5%-7%", 4),
+                ("涨7%-10%", 6), ("涨10%以上", 8),
+            ]
+            down_weights = [
+                ("跌0%-3%", -1), ("跌3%-5%", -2), ("跌5%-7%", -4),
+                ("跌7%-10%", -6), ("跌10%以上", -8),
+            ]
+            dist_score = 0
+            dist_found = False
+            for key, w in up_weights + down_weights:
+                cnt = _i(distribution.get(key)) or 0
+                if cnt:
+                    dist_found = True
+                    dist_score += int(round(cnt / 100.0 * w))
+            # 旧版分布键兜底（新细分区间接不到时，用 0-2/2-5/5-10 近似）
+            if not dist_found:
+                old_weights = [
+                    ("涨0%-2%", 1), ("涨2%-5%", 2), ("涨5%-10%", 5),
+                    ("跌0%-2%", -1), ("跌2%-5%", -2), ("跌5%-7%", -4),
+                    ("跌7%以上", -8),
+                ]
+                for key, w in old_weights:
+                    cnt = _i(distribution.get(key)) or 0
+                    if cnt:
+                        dist_found = True
+                        dist_score += int(round(cnt / 100.0 * w))
+            if dist_found:
+                total += dist_score
+                reasons.append(f"涨跌分布区间加权：{dist_score:+d}")
             score = max(-100, min(100, 50 + total))
             out["weather"] = _weather_of(score)
             out["emotion_score"] = score
@@ -932,6 +958,9 @@ def fetch_sector_heat() -> dict:
 EXTRA_INDEX_DEFS = [
     {"name": "平均股价", "code": "880003", "source": "通达信协议", "secid": None,
      "note": "通达信协议日K（88 开头指数，market=1；已实测）"},
+    {"name": "同花顺全A", "code": "880011", "source": "通达信协议", "secid": None,
+     "note": "通达信协议日K（同花顺全A，88 开头指数，market=1）"},
+
     {"name": "微盘股", "code": "BK1158", "source": "东财板块", "secid": "90.BK1158",
      "note": "东财板块实时（已实测）"},
     {"name": "高股息股", "code": "BK1641", "source": "东财板块", "secid": "90.BK1641",
@@ -1207,9 +1236,9 @@ def _value_growth_pcts():
 
 
 def _dim_score(a_pct: float, b_pct: float) -> int:
-    """维度得分：score = 50 + (a - b) × 200（2026-08-07 灵敏度翻倍：
-    1 个百分点 = 2 分，短线强弱差异更可辨），clamp 0-100 取整。"""
-    s = 50.0 + (a_pct - b_pct) * 200.0
+    """维度得分：score = 50 + (a - b) × 1000（2026-08-07 灵敏度翻倍：
+    1 个百分点 = 10 分，短线强弱差异更可辨），clamp 0-100 取整。"""
+    s = 50.0 + (a_pct - b_pct) * 1000.0
     return int(round(max(0.0, min(100.0, s))))
 
 

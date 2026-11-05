@@ -252,7 +252,7 @@ def test_a1_current_contract_and_live_elapsed(monkeypatch):
         # 长时间停留在某阶段，便于两次轮询观察 elapsed_ms 实时增大（或不减少）
         time.sleep(0.5)
         if progress_cb:
-            progress_cb("analysts", 20, "分析师 1/5", None)
+            progress_cb("analysts", 20, "分析师 1/6", None)
         time.sleep(0.5)
         return make_fake_day()[0](date, mode, max_rounds, trace, progress_cb)
 
@@ -309,7 +309,7 @@ def test_a2_analyst_stage_visible(monkeypatch):
         # 长时间停留在 analysts 阶段并上报含「分析师」的进度消息（含 meta type=analyst 子事件），
         # 使轮询稳定捕获 stage=analysts 且 message 含「分析师」。
         # 先落到 analysts 阶段（非 analyst 子事件，message 为「分析师 …」）并保持足够久
-        progress_cb("analysts", 20, "分析师 1/5", None)
+        progress_cb("analysts", 20, "分析师 1/6", None)
         time.sleep(0.4)
         for idx, (sid, name) in enumerate(SKILLS, 2):
             progress_cb("analysts", 20 * idx, f"分析师 {idx}/{len(SKILLS)}", None)
@@ -355,7 +355,7 @@ def test_a3_retry_visible_and_success_reset(monkeypatch):
         calls.append({"date": date, "attempt": attempt})
         if progress_cb:
             # 每次尝试都上报一次阶段进度，让重试期间 current 可轮询到
-            progress_cb("analysts", 20, f"第 {attempt} 次尝试 分析师 1/5", None)
+            progress_cb("analysts", 20, f"第 {attempt} 次尝试 分析师 1/6", None)
         if attempt < 3:
             time.sleep(0.05)
             raise RuntimeError("模拟单日失败：行情源暂时不可用")
@@ -746,7 +746,7 @@ def test_e2_llm_timeout_failfast_two_attempts(monkeypatch):
         attempt = sum(1 for c in calls if c["date"] == date) + 1
         calls.append({"date": date, "attempt": attempt, "ok": False})
         if progress_cb:
-            progress_cb("analysts", 20, f"第 {attempt} 次尝试 分析师 1/5", None)
+            progress_cb("analysts", 20, f"第 {attempt} 次尝试 分析师 1/6", None)
         # LLM 硬超时形态：python 内置 TimeoutError
         raise TimeoutError("LLM 调用超时（200s），按降级处理")
 
@@ -803,7 +803,7 @@ def test_e3_data_failure_keeps_three_attempts(monkeypatch):
         attempt = sum(1 for c in calls if c["date"] == date) + 1
         calls.append({"date": date, "attempt": attempt, "ok": False})
         if progress_cb:
-            progress_cb("analysts", 20, f"第 {attempt} 次尝试 分析师 1/5", None)
+            progress_cb("analysts", 20, f"第 {attempt} 次尝试 分析师 1/6", None)
         raise RuntimeError("模拟单日失败：行情源暂时不可用")
 
     monkeypatch.setattr(btest, "_run_review_day_impl", data_fail_impl)

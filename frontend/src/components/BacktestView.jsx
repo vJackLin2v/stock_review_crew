@@ -3,16 +3,19 @@ import * as api from "../api";
 import {
   normalizeBacktest,
   normalizeBacktestHistoryItem,
+  normalizeReviewDetail,
 } from "../normalize";
-import { isNone, num } from "../format";
+import { isNone, num, fmtAmount, fmtPct, fmtSignedPct, moneyClass } from "../format";
+import { ANALYSTS } from "../mock";
 import { stageLabel } from "../stages";
 import { Chart } from "./Charts";
+import MultiSelect from "./MultiSelect";
 
 // 历史回测「回测」tab（requirements-backtest-ui §七）
 //   顶部选范围 + force/max_rounds → 启动；2s 轮询进度（终态停）；
 //   总进度条 + 每天耗时折线图 + 每天可展开列表（settle/节点/分析师耗时）；
 //   底部历史回测（可点开终态只读查看）。
-const ACCENT = "#6859cf";
+const ACCENT = "#c8423c";
 const TEXT2 = "#7a7f87";
 
 // 阶段 key → 中文（固定：settle / fetch / analysts / host / report / review / analyst / error）
@@ -169,6 +172,34 @@ function DayDetail({ day }) {
   );
   const maxValue = maxMs > 0 ? maxMs : 1;
 
+  const [skillPrompts, setSkillPrompts] = useState({});
+  useEffect(() => {
+    api.getSkills()
+      .then((res) => {
+        const list = res && res.skills ? res.skills : Array.isArray(res) ? res : [];
+        const m = {};
+        (list || []).forEach((sk) => { if (sk && sk.id) m[sk.id] = sk.prompt || ""; });
+        setSkillPrompts(m);
+      })
+      .catch(() => {});
+  }, []);
+  const [dayReport, setDayReport] = useState(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    setReportLoading(true);
+    api.getReviewByDate(day.date)
+      .then((raw) => {
+        if (!alive) return;
+        const detail = normalizeReviewDetail(raw);
+        setDayReport(detail);
+      })
+      .catch(() => { if (alive) setDayReport(null); })
+      .finally(() => { if (alive) setReportLoading(false); });
+    return () => { alive = false; };
+  }, [day.date]);
+
+
   return (
     <div className="bt-day-detail">
       {/* 顶部：当天已耗时总览（= day.elapsed_ms，与折线图口径一致，含重试） */}
@@ -198,7 +229,7 @@ function DayDetail({ day }) {
           </tr>
         </thead>
         <tbody>
-          <DetailTableRow label="settle 撮合" value={settleMs} max={maxValue} accent="#5c7cfa" />
+          <DetailTableRow label="settle 撮合" value={settleMs} max={maxValue} accent="#d4a017" />
           <DetailTableRow label="review 复盘（合计）" value={reviewMs} max={maxValue} accent={ACCENT} />
           {stageList.map((s) => (
             <DetailTableRow
@@ -215,11 +246,33 @@ function DayDetail({ day }) {
               label={a.name || `分析师${i + 1}`}
               value={num(a && a.elapsed_ms, NaN)}
               max={maxValue}
-              accent="#6d5bd0"
+              accent="#a93226"
             />
           ))}
         </tbody>
       </table>
+          <div className="bt-detail-title">分析师点评</div>
+          {reportLoading ? (
+            <div style={{ padding: "8px 0", color: "#888", fontSize: 13 }}>正在加载当日分析师点评…</div>
+          ) : dayReport && dayReport.analyses && dayReport.analyses.length ? (
+            <div style={{ marginBottom: 8 }}>
+              {dayReport.analyses.map((an, idx) => (
+                <details key={`comment-${an.skill_id || idx}`} style={{ marginBottom: 6 }}>
+                  <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600 }}>{an.skill_name || an.name || `分析师${idx + 1}`}</summary>
+                  <div style={{ whiteSpace: "pre-wrap", background: "#f6f8fa", padding: 10, borderRadius: 6, fontSize: 13, maxHeight: 420, overflow: "auto", marginTop: 4 }}>
+                    {an.analysis || "（暂无点评内容）"}
+                  </div>
+                  {skillPrompts[an.skill_id] ? (
+                    <details style={{ marginTop: 6 }}><summary style={{ cursor: "pointer", fontSize: 12, color: "#888" }}>查看该分析师提示词</summary><pre style={{ whiteSpace: "pre-wrap", background: "#f6f8fa", padding: 8, borderRadius: 6, fontSize: 12, maxHeight: 240, overflow: "auto" }}>{skillPrompts[an.skill_id]}</pre></details>
+                  ) : null}
+                </details>
+              ))}
+            </div>
+          ) : (
+            <div style={{ padding: "8px 0", color: "#888", fontSize: 13 }}>该日暂无分析师点评记录</div>
+          )}
+
+
       {/* 重试明细表（有失败条目才显示） */}
       <RetryTable rows={day.attempts_log} />
       {/* 失败原因 */}
@@ -377,8 +430,8 @@ function DailyTrendChart({ days }) {
               type: "linear",
               x: 0, y: 0, x2: 0, y2: 1,
               colorStops: [
-                { offset: 0, color: "rgba(104,89,207,.18)" },
-                { offset: 1, color: "rgba(104,89,207,0)" },
+                { offset: 0, color: "rgba(200,66,60,.18)" },
+                { offset: 1, color: "rgba(200,66,60,0)" },
               ],
             },
           },
@@ -448,6 +501,52 @@ function HistoryList({ history, onOpen, onResume, loading, error }) {
   );
 }
 
+// 回测期末账户摘要（2026-08-17 新增）：done 后展示每位分析师的资产/收益/成交/回撤等
+function AccountSummary({ accounts }) {
+  if (!accounts || typeof accounts !== "object") return null;
+  const rows = Object.values(accounts).filter((a) => a && a.skill_id);
+  if (!rows.length) return null;
+  return (
+    <div className="bt-account-summary">
+      <div className="bt-section-title">回测期末账户摘要</div>
+      <div className="bt-table-scroll">
+        <table className="bt-account-table">
+          <thead>
+            <tr>
+              <th>分析师</th>
+              <th>期末资产</th>
+              <th>收益率</th>
+              <th>已实现盈亏</th>
+              <th>成交/拒绝</th>
+              <th>最大回撤</th>
+              <th>胜率</th>
+              <th>盈亏比</th>
+              <th>平均持仓</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((a) => (
+              <tr key={a.skill_id || a.name}>
+                <td>{a.name || a.skill_id}</td>
+                <td>{fmtAmount(a.total_assets)}</td>
+                <td className={moneyClass(a.return_rate)}>{fmtSignedPct(a.return_rate)}</td>
+                <td className={moneyClass(a.realized_pnl)}>{fmtAmount(a.realized_pnl)}</td>
+                <td>{isNone(a.filled) ? "—" : a.filled} / {isNone(a.rejected) ? "—" : a.rejected}</td>
+                <td className="neg">{fmtPct(a.max_drawdown)}</td>
+                <td>{isNone(a.win_rate) ? "—" : fmtPct(a.win_rate)}</td>
+                <td>{isNone(a.profit_loss_ratio) ? "—" : Number(a.profit_loss_ratio).toFixed(2)}</td>
+                <td>{isNone(a.avg_holding_days) ? "—" : `${a.avg_holding_days} 天`}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="bt-note">仅供参考，不构成投资建议</div>
+    </div>
+  );
+}
+
+
 export default function BacktestView({ onBack }) {
   const [startDate, setStartDate] = useState("2026-07-01");
   const [endDate, setEndDate] = useState("2026-08-14");
@@ -455,6 +554,7 @@ export default function BacktestView({ onBack }) {
   const [lite, setLite] = useState(false);
   const [maxRounds, setMaxRounds] = useState(3);
   const [bt, setBt] = useState(null);   // 当前展示的回测快照（norm）
+    const [btAnalysts, setBtAnalysts] = useState(ANALYSTS.map((a) => a.id));
   const [btError, setBtError] = useState("");
   const [startBusy, setStartBusy] = useState(false);
   const [polling, setPolling] = useState(false);
@@ -553,7 +653,7 @@ export default function BacktestView({ onBack }) {
     setStartBusy(true);
     setBtError("");
     try {
-      const res = await api.startBacktest({ start: startDate, end: endDate, force, lite, max_rounds: maxRounds });
+      const res = await api.startBacktest({ start: startDate, end: endDate, force, lite, max_rounds: maxRounds, analysts: btAnalysts.length ? btAnalysts : undefined });
       const id = res && (res.backtest_id || res.id);
       if (!id) throw new Error("后端未返回回测编号");
       const init = normalizeBacktest({
@@ -561,7 +661,7 @@ export default function BacktestView({ onBack }) {
         status: "queued",
         start: startDate,
         end: endDate,
-        params: { force, lite, max_rounds: maxRounds, mode: "close" },
+        params: { force, lite, max_rounds: maxRounds, mode: "close", analysts: btAnalysts.length ? btAnalysts : undefined },
         days_total: 0,
         days_done: 0,
         days: [],
@@ -577,7 +677,7 @@ export default function BacktestView({ onBack }) {
     } finally {
       setStartBusy(false);
     }
-  }, [startDate, endDate, force, lite, maxRounds, beginPolling]);
+  }, [startDate, endDate, force, lite, maxRounds, btAnalysts, beginPolling]);
 
   const handleCancel = useCallback(async () => {
     if (!bt || !bt.id) return;
@@ -707,6 +807,14 @@ export default function BacktestView({ onBack }) {
             onChange={(e) => setMaxRounds(Math.max(1, Math.min(20, Number(e.target.value) || 3)))}
           />
         </div>
+          <div className="bt-fields" style={{ marginTop: 10, maxWidth: 320 }}>
+            <MultiSelect
+              options={ANALYSTS}
+              value={btAnalysts}
+              onChange={setBtAnalysts}
+              placeholder="选择参与回测的分析师"
+            />
+          </div>
         {btError ? <div className="bt-error">{btError}</div> : null}
         <div className="bt-top-actions">
           {bt && (bt.isRunning || bt.status === "queued") ? (
@@ -776,6 +884,10 @@ export default function BacktestView({ onBack }) {
               <span className="bt-node-msg-top">节点消息：<b>{curMessage}</b></span>
             ) : null}
           </div>
+
+            {/* 回测期末账户摘要（done 且有数据时展示） */}
+            <AccountSummary accounts={bt.accounts} />
+
 
           {/* 每天耗时折线图 */}
           <div className="bt-chart-block">

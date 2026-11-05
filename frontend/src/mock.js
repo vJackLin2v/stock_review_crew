@@ -14,8 +14,8 @@ export const ANALYSTS = [
   { id: "baxiaoxian", skill_name: "拔小弦", role: "短线" },
   { id: "yangjia", skill_name: "炒股养家", role: "情绪" },
   { id: "tiechui", skill_name: "铁锤狂砸盘", role: "实战" },
-];
-
+    { id: "daxianzun", skill_name: "大A仙尊", role: "低吸轮动" },
+  ];
 const pad = (x) => String(x).padStart(2, "0");
 
 export function isoDate(d = new Date()) {

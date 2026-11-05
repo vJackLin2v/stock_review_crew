@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
-# 初始资金（用户确认：每位分析师 10 万元）
+# 初始资金默认值（用户可配置：每位分析师 10 万元）
 INITIAL_CASH = 100_000.0
 
 # 涨跌停系数：前缀 → ±比例（北证/ B 股不支持交易）
@@ -24,8 +24,12 @@ _LIMIT_PCT: dict[tuple[str, ...], float] = {
 _REJECT_PREFIX = ("8", "4", "92")  # 北证 / 三板 / B 股
 
 
-def _limit_pct(code: str) -> Optional[float]:
-    """按代码前缀返回涨跌幅（小数）；北证/B 股返回 None（不支持交易）。"""
+def _limit_pct(code: str, name: str = "") -> Optional[float]:
+    """按代码前缀返回涨跌幅（小数）；北证/B 股返回 None（不支持交易）。
+
+    A 股交易规则：主板普通股票 ±10%；主板 ST/*ST 股票 ±5%；
+    科创板（688/689）与创业板（300/301）±20%（注册制板块 ST 股仍为 20%）。
+    """
     c = str(code or "")
     if c.startswith(_REJECT_PREFIX):
         return None
@@ -33,13 +37,15 @@ def _limit_pct(code: str) -> Optional[float]:
         if c.startswith(prefixes):
             return pct
     if c.startswith(("0", "6")):
+        if "ST" in str(name or "").upper():
+            return 0.05
         return 0.10
     return None
 
 
 def min_buy_unit(code: str) -> int:
     """A 股最小买入单位（股）：
-    - 科创板（688/689）：最低 200 股（2 手）起，之后按 100 股递增；
+    - 科创板（688/689）：最低 200 股起，超过 200 股可以 1 股递增；
     - 其余主板/创业板：100 股整数倍（1 手）。
     北证/B 股由 _limit_pct 拒绝，不会走到这里。
     """
@@ -51,23 +57,79 @@ def min_buy_unit(code: str) -> int:
 
 def round_lot(qty: int, code: str, side: str = "buy") -> int:
     """按 A 股规则取整股数：
-    - 买入：科创板最低 200 股起、100 股递增；其余 100 股整数倍；
-    - 卖出：100 股整数倍；若持仓含零股（不足 100 股部分）允许一次性卖出。
+    - 主板/创业板：买入 100 股整数倍；卖出 100 股整数倍，零股（不足 100 股部分）
+      允许一次性卖出；
+    - 科创板（688/689）：限价申报 200 股起，超过 200 股可以 1 股递增；卖出余额
+      不足 200 股的部分一次性申报卖出。
     """
     qty = max(0, int(qty))
     if qty == 0:
         return 0
+    c = str(code or "")
+    if c.startswith(("688", "689")):
+        if side == "buy":
+            return qty if qty >= 200 else 0
+        # 卖出：200 股起、1 股递增；不足 200 股的零股在可用数量校验后一次性卖出
+        return qty
     if side == "sell":
-        # 卖出：100 股整数倍；不足 100 股的零股允许整仓一次性卖出
+        # 主板/创业板卖出：100 股整数倍；不足 100 股的零股允许整仓一次性卖出
         lots = qty // 100
         return lots * 100 if lots > 0 else qty
-    # 买入：按 100 股递增
+    # 主板/创业板买入：100 股整数倍
     lots = qty // 100
     qty2 = lots * 100
     unit = min_buy_unit(code)
     if qty2 < unit:
         return 0  # 不足最小单位（科创板 200 股/2 手起）
     return qty2
+
+
+def _normalize_sell_qty(raw_qty: int, available: int, code: str) -> int:
+    """按 A 股卖出规则归一卖出数量；返回 0 表示不可卖（数量不符合申报规则）。
+
+    - 主板/创业板：100 股整数倍；不足 100 股的零股仅当「全部可卖持仓」一起卖出时允许；
+    - 科创板（688/689）：200 股起、1 股递增；不足 200 股的零股仅当「全部可卖持仓」
+      一起卖出时允许。
+    """
+    raw_qty = max(0, int(raw_qty))
+    available = max(0, int(available))
+    if raw_qty == 0 or available == 0:
+        return 0
+    c = str(code or "")
+    if c.startswith(("688", "689")):
+        # 科创板：200 股起、1 股递增；不足 200 股的零股必须一次性全卖
+        if raw_qty >= available:
+            return available
+        return raw_qty if raw_qty >= 200 else 0
+    # 主板/创业板：100 股整数倍；不足 100 股的零股必须一次性全卖
+    if raw_qty >= available:
+        return available
+    return (raw_qty // 100) * 100 if raw_qty >= 100 else 0
+
+
+def _is_restricted_stock(name: str, day: dict) -> tuple[bool, str]:
+    """交易限制：ST/*ST、新股（N/C 前 5 日）、次新股（上市未满一年）禁止交易。"""
+    name_s = str(name or "")
+    if "ST" in name_s.upper():
+        return True, "ST/*ST 股票不允许交易"
+    if name_s.upper().startswith(("N", "C")):
+        return True, "新股上市前 5 个交易日无涨跌幅限制，模拟盘不参与"
+    list_date = None
+    if isinstance(day, dict):
+        list_date = day.get("list_date") or day.get("listing_date")
+    if list_date:
+        try:
+            from datetime import datetime
+            trade_date = str(day.get("date") or "") if isinstance(day, dict) else ""
+            list_clean = str(list_date).replace("-", "").strip()
+            if len(list_clean) == 8 and len(trade_date) == 10:
+                list_dt = datetime.strptime(list_clean, "%Y%m%d")
+                trade_dt = datetime.strptime(trade_date, "%Y-%m-%d")
+                if (trade_dt - list_dt).days < 365:
+                    return True, "次新股（上市未满一年）不允许交易"
+        except Exception:  # noqa: BLE001 - list_date 解析失败按不限制处理
+            pass
+    return False, ""
 
 
 def _round_half_up(value: float, digits: int = 2) -> float:
@@ -108,11 +170,22 @@ class TradeResult:
     trade: Optional[dict] = None
 
 
+def initial_cash() -> float:
+    """读取分析师初始资金（设置文件 → 默认 10 万）；绝不抛异常。"""
+    try:
+        from .storage import load_initial_cash
+        return float(load_initial_cash())
+    except Exception:  # noqa: BLE001 - 设置读取失败按默认
+        return INITIAL_CASH
+
+
 def open_account(skill_id: str) -> dict:
-    """开户：初始资金 10 万、无持仓、无交易。已存在则原样返回。"""
+    """开户：初始资金读取设置（默认 10 万）、无持仓、无交易。已存在则原样返回。"""
+    _initial = initial_cash()
     return {
         "skill_id": skill_id,
-        "cash": INITIAL_CASH,
+        "cash": _initial,
+        "initial_cash": _initial,  # 开户时冻结期初资金，避免设置变更追溯旧账户
         "positions": {},  # code -> {name, qty, frozen_qty, avg_cost}
         "current_date": None,  # 最近交易日（用于 T+1 冻结结算）
         "realized_pnl": 0.0,
@@ -143,10 +216,11 @@ def place_order(
     sell_reason: Optional[str] = None,
 ) -> TradeResult:
     """下单（口径用户已确认）：
-    - 目标价 ≥ 涨停价 → 拒买（涨停买不进）；目标价 ≤ 跌停价 → 拒卖；
+    - 目标价 ≥ 涨停价或 < 跌停价 → 拒买；目标价 ≤ 跌停价或 > 涨停价 → 拒卖；
     - 当日价格区间未覆盖目标价（最低 > 目标价 或 最高 < 目标价）→ 拒；
     - T+1：卖出数量 ≤ 可用持仓（总持仓 − 当日买入冻结）；
-    - 资金：买入数量 = floor(可用现金×成数/10/(目标价×1.001)/100)×100；
+    - 资金：买入数量 = floor(可用现金×成数/10/(目标价×1.001))；主板/创业板
+        取 100 股整数倍，科创板 200 股起、1 股递增；
       若显式传 qty（具体股数）则优先使用，并按 A 股最小单位取整；
     - 费用：佣金 万2.5 最低 5 元、过户费 0.001% 双向、印花税 卖出 0.05%；
     - 拒绝也完整记录（合规审计）。绝不抛异常。
@@ -178,33 +252,41 @@ def place_order(
         if not (0 < cheng <= 10) and qty is None:
             return TradeResult(False, f"仓位成数无效：{position_cheng}（应为 1-10 成）")
 
-        pct = _limit_pct(code)
+        _restricted, _restricted_reason = _is_restricted_stock(name, day)
+        if _restricted:
+            return TradeResult(False, _restricted_reason)
+
+        pct = _limit_pct(code, name)
         if pct is None:
             return TradeResult(False, "北证/B 股不支持交易")
         limit_up, limit_down = limit_prices(pre_close, pct)
 
-        # 涨跌停约束
+        # 涨跌停约束（A 股限价申报价格必须在 [跌停价, 涨停价] 区间内）
         if side == "buy":
             if target >= limit_up:
                 return TradeResult(False, f"目标价 {target:.2f} 不低于涨停价 {limit_up:.2f}，无法买入")
+            if target < limit_down:
+                return TradeResult(False, f"目标价 {target:.2f} 低于跌停价 {limit_down:.2f}，无法买入")
         elif side == "sell":
             if target <= limit_down:
                 return TradeResult(False, f"目标价 {target:.2f} 不高于跌停价 {limit_down:.2f}，无法卖出")
+            if target > limit_up:
+                return TradeResult(False, f"目标价 {target:.2f} 高于涨停价 {limit_up:.2f}，无法卖出")
         else:
             return TradeResult(False, f"未知方向：{side}")
 
-        # 限价单语义（2026-08-16 用户确认）：买入现价 ≤ 目标价即触发（现价更便宜应直接买）；
-        # 卖出现价 ≥ 目标价即触发（现价更高应直接卖）。成交价一律按目标价（口径不变）。
+        # 撮合语义（2026-08-16 二次修正，用户确认）：
+        # - 买入：现价 ≤ 目标价即触发（现价更便宜应直接买）；现价整天高于目标价则等回调，拒绝；
+          # - 卖出：现价 ≥ 目标价即触发（现价更高应直接卖），按目标价成交；
+          #   卖出目标价高于当日最高价时，说明当天没等到目标价，按“开盘即卖出”处理，
+          #   成交价=开盘价（开盘价缺失时用最低价兜底），不再拒绝。
         if side == "buy" and low > target:
             return TradeResult(
                 False,
                 f"当日未触及目标价 {target:.2f}（区间 {low:.2f}–{high:.2f}）",
             )
-        if side == "sell" and high < target:
-            return TradeResult(
-                False,
-                f"当日未触及目标价 {target:.2f}（区间 {low:.2f}–{high:.2f}）",
-            )
+        
+
 
         _settle_day(acct, date)
         positions = acct.get("positions", {})
@@ -226,9 +308,9 @@ def place_order(
             tf = _transfer_fee(amount)
             total = amount + fee + tf
             # 边界保护（2026-08-10）：金额+费用不得超过可用现金，
-            # 超过则逐手（100 股）递减，但不得低于最小买入单位
+            # 超过则科创板按 1 股递减、主板/创业板按 100 股递减，但不得低于最小买入单位
             # （科创板 688/689 最低 200 股起，2026-08-13 修复：不再递减到 100 股成交）
-            _step = 100
+            _step = 1 if code.startswith(("688", "689")) else 100
             _min_qty = min_buy_unit(code)
             while total > acct["cash"] + 1e-6 and qty - _step >= _min_qty:
                 qty -= _step
@@ -288,30 +370,48 @@ def place_order(
         if pos is None:
             return TradeResult(False, "无持仓，无法卖出（禁止裸卖空）")
         available = pos["qty"] - pos.get("frozen_qty", 0)
+        if available <= 0:
+            return TradeResult(False, "可卖持仓不足（T+1：当日买入不可卖）")
         if qty is not None:
-            qty = round_lot(int(qty), code, side="sell")
-            if qty > available:
+            if int(qty) > available:
                 return TradeResult(
                     False,
-                    f"卖出数量 {qty} 超过可卖持仓 {available}（T+1 冻结 {pos.get('frozen_qty', 0)}）",
+                    f"卖出数量 {int(qty)} 超过可卖持仓 {available}（T+1 冻结 {pos.get('frozen_qty', 0)}）",
                 )
+            qty = _normalize_sell_qty(int(qty), available, code)
         else:
             raw_qty = int(available * cheng / 10.0)
-            qty = round_lot(raw_qty, code, side="sell")
-            # 边界保护：成数折算结果不得超过可卖持仓
-            while qty > available and qty > 100:
-                qty -= 100
+            qty = _normalize_sell_qty(raw_qty, available, code)
         if qty <= 0:
             return TradeResult(
                 False,
-                "可卖持仓不足（T+1：当日买入不可卖）" if available <= 0
-                else "可卖持仓不足（折算数量为 0）",
+                "可卖持仓不足（折算数量为 0 或不符合最小卖出单位：主板/创业板 100 股整数倍，"
+                "科创板 200 股起且 1 股递增；零股须一次性全部卖出）",
             )
-        amount = round(target * qty, 6)
+
+          # 卖出成交价：正常按目标价；若目标价高于当日最高价，说明没等到目标价，
+          # 按“开盘即卖出”处理，成交价=开盘价（开盘价缺失时用最低价兜底）。
+        sell_price = target
+        if high < target:
+            try:
+                open_price = day.get("open")
+                sell_price = float(open_price) if open_price is not None else float(low)
+            except (TypeError, ValueError):
+                sell_price = float(low)
+                  # 卖出成交价：正常按目标价；若目标价高于当日最高价，说明没等到目标价，
+                  # 按“开盘即卖出”处理，成交价=开盘价（开盘价缺失时用最低价兜底）。
+                  # sell_price = target
+                  # if high < target:
+              # try:
+                  # open_price = day.get("open")
+                  # sell_price = float(open_price) if open_price is not None else float(low)
+              # except (TypeError, ValueError):
+                  # sell_price = float(low)
+        amount = round(sell_price * qty, 6)
         fee = _commission(amount)
         stamp = _stamp_tax(amount)
         tf = _transfer_fee(amount)
-        realized = round((target - pos["avg_cost"]) * qty - fee - stamp - tf, 6)
+        realized = round((sell_price - pos["avg_cost"]) * qty - fee - stamp - tf, 6)
         acct["cash"] = round(acct["cash"] + amount - fee - stamp - tf, 6)
         pos["qty"] -= qty
         pos["frozen_qty"] = max(0, pos.get("frozen_qty", 0))  # 卖出只减 qty，不动 frozen_qty
@@ -321,7 +421,7 @@ def place_order(
         trade = {
             "date": date, "code": code, "name": str(name or code),
             "side": "sell", "target_price": target, "qty": qty,
-            "price": target, "amount": amount, "fee": fee,
+            "price": sell_price, "amount": amount, "fee": fee,
             "stamp_tax": stamp, "transfer_fee": tf,
             "status": "成交", "reject_reason": "", "cash_after": acct["cash"],
             "realized": realized,  # 单笔已实现盈亏（含费用），供胜率/盈亏比统计
@@ -337,6 +437,44 @@ def place_order(
 DEFAULT_STOP_LOSS_RATE = 0.95
 DEFAULT_TAKE_PROFIT_RATE = 1.10
 DEFAULT_MAX_HOLD_DAYS = 13
+
+# 每位分析师的专属交易模型（2026-08-16 最新回测打磨）：
+# - stop_loss_rate / take_profit_rate：买入价乘数（0.95 = -5%，1.10 = +10%）；
+# - max_hold_days：持有超时天数；
+# - trailing_drawdown：可选移动止盈回落比例（None=固定止盈）；
+# - 仅当分析师推荐行没有显式写出对应字段时，引擎用此兜底。
+ANALYST_TRADING_DEFAULTS: dict[str, dict[str, Any]] = {
+    "alang": {
+        "stop_loss_rate": 0.95,
+        "take_profit_rate": 1.10,
+        "max_hold_days": 13,
+        "trailing_drawdown": None,
+    },
+    "baxiaoxian": {
+        "stop_loss_rate": 0.96,
+        "take_profit_rate": 1.06,
+        "max_hold_days": 3,
+        "trailing_drawdown": None,
+    },
+    "bingchuan": {
+        "stop_loss_rate": 0.95,
+        "take_profit_rate": 1.08,
+        "max_hold_days": 5,
+        "trailing_drawdown": 0.04,
+    },
+    "tiechui": {
+        "stop_loss_rate": 0.96,
+        "take_profit_rate": 1.06,
+        "max_hold_days": 3,
+        "trailing_drawdown": None,
+    },
+    "yangjia": {
+        "stop_loss_rate": 0.95,
+        "take_profit_rate": 1.08,
+        "max_hold_days": 3,
+        "trailing_drawdown": None,
+    },
+}
 
 # 条件单 reason（condition 字段值）→ 中文卖出理由（requirements-trades-fix §二.2）
 CONDITION_SELL_REASON: dict[str, str] = {
@@ -365,6 +503,43 @@ def apply_conditional_defaults(conditional: Optional[dict], buy_price: float) ->
     }
 
 
+def apply_analyst_conditional_defaults(
+    conditional: Optional[dict],
+    buy_price: float,
+    skill_id: Optional[str] = None,
+) -> dict:
+    """按分析师专属交易模型补齐缺失的条件单字段。
+
+    显式字段始终优先；缺失字段先查 ``ANALYST_TRADING_DEFAULTS[skill_id]``，
+    查不到再回退全局默认（0.95 / 1.10 / 13 / 固定止盈）。
+    """
+    model = dict(ANALYST_TRADING_DEFAULTS.get(str(skill_id or ""), {}))
+    # 2026-08-17：移动止盈兜底优先从 skills/{id}/skill.json 的 trading_params 读取，
+    # 避免硬编码字典与 skill.json 漂移；读取失败保持硬编码值（None=固定止盈）。
+    if model.get("trailing_drawdown") is None:
+        try:
+            from ..skills import load_skill
+            _skill = load_skill(str(skill_id or "")) or {}
+            _tdd = ((_skill.get("trading_params") or {}).get("trailing_drawdown"))
+            if _tdd is not None:
+                model["trailing_drawdown"] = float(_tdd)
+        except Exception:  # noqa: BLE001 - 读不到 skill 时按固定止盈兜底
+            pass
+    c = conditional or {}
+    return {
+        "stop_loss": float(c.get("stop_loss")) if c.get("stop_loss") is not None
+        else round(buy_price * float(model.get("stop_loss_rate", DEFAULT_STOP_LOSS_RATE)), 6),
+        "take_profit": float(c.get("take_profit")) if c.get("take_profit") is not None
+        else round(buy_price * float(model.get("take_profit_rate", DEFAULT_TAKE_PROFIT_RATE)), 6),
+        "max_hold_days": int(c.get("max_hold_days")) if c.get("max_hold_days") is not None
+        else int(model.get("max_hold_days", DEFAULT_MAX_HOLD_DAYS)),
+        "trailing_drawdown": float(c["trailing_drawdown"])
+        if c.get("trailing_drawdown") is not None
+        else (float(model["trailing_drawdown"])
+              if model.get("trailing_drawdown") is not None else None),
+    }
+
+
 def _one_word_limit_down(quote: dict, code: str) -> bool:
     """一字跌停判定：当日开盘=最低=最高=收盘=跌停价（开板前无法成交）。
     open 缺失（源拿不到）时退化为 低=高=收盘=跌停价（一字封死签名；
@@ -376,7 +551,7 @@ def _one_word_limit_down(quote: dict, code: str) -> bool:
         pre_close = quote.get("pre_close")
         if pre_close is None:
             return False
-        pct = _limit_pct(code)
+        pct = _limit_pct(code, quote.get("name") or "")
         if pct is None:
             return False
         limit_up, limit_down = limit_prices(float(pre_close), pct)

@@ -93,7 +93,12 @@ def _position_rows(acct: dict, close_prices: dict | None = None) -> list[dict]:
 
 def _summary(skill_id: str, acct: dict, names: dict) -> dict:
     snapshots = acct.get("snapshots") or []
-    init = acct_engine.INITIAL_CASH
+    init = acct.get("initial_cash")
+    if not init:
+        # 兼容旧账户：未持久化 initial_cash 时，用首个结算日总资产近似期初资金
+        # （买入不改变总资产，首日快照 total_assets 即开户资金）
+        init = float(snapshots[0]["total_assets"]) if snapshots and snapshots[0].get("total_assets") \
+            else acct_engine.INITIAL_CASH
     # 2026-08-12（用户反馈：收益率曲线与累计收益率对不上）：
     # 对齐同花顺口径——累计收益率 = (总资产-期初)/期初，总资产按**最近收盘快照**估值
     # （与收益率曲线终点同源，恒一致）。
@@ -104,6 +109,22 @@ def _summary(skill_id: str, acct: dict, names: dict) -> dict:
     unrealized = sum((r.get("pnl") or 0.0) for r in rows)
     total = round(float(snapshots[-1]["total_assets"]), 6) if snapshots \
         else round(acct.get("cash", 0.0), 6)
+    # 2026-08-17：平均仓位 = 各结算日快照 position_mv / total_assets 的均值（小数，0.5=50%）
+    avg_position = None
+    position_ratios = []
+    for s in snapshots:
+        ta = s.get("total_assets")
+        pm = s.get("position_mv")
+        if ta and pm is not None:
+            try:
+                ratio = float(pm) / float(ta)
+                if 0 <= ratio <= 1:
+                    position_ratios.append(ratio)
+            except (TypeError, ValueError):
+                continue
+    if position_ratios:
+        avg_position = round(sum(position_ratios) / len(position_ratios), 6)
+
     stats = acct_engine.trade_stats(acct)
     today = str(snapshots[-1]["date"]) if snapshots else ""
     today_trades = [t for t in (acct.get("trades") or []) if t.get("date") == today]
@@ -116,25 +137,27 @@ def _summary(skill_id: str, acct: dict, names: dict) -> dict:
             degraded.append("历史价缺失（旧快照未存持仓收盘价），持仓现价/浮盈按成本价估值")
         elif snapshots[-1].get("estimated_prices"):
             degraded.append("部分持仓结算日收盘价缺失，已按成本价估值")
-    return {
-        "skill_id": skill_id,
-        "name": names.get(skill_id, skill_id),
-        "cash": round(acct.get("cash", 0.0), 6),
-        "total_assets": round(total, 6),
-        "total_return_rate": round((total - init) / init, 6),
-        "unrealized_pnl": round(unrealized, 6),
-        "realized_pnl": round(acct.get("realized_pnl", 0.0), 6),
-        "win_rate": stats.get("win_rate"),
-        "profit_loss_ratio": stats.get("profit_loss_ratio"),
-        "avg_holding_days": stats.get("avg_holding_days"),
-        "today_trades_count": len([t for t in today_trades if t.get("status") == "成交"]),
-        "today_rejected_count": len([t for t in today_trades if t.get("status") == "拒绝"]),
-        "updated_at": today,
-        # R16：账户结算日（前端「结算至 X」标注用；None=尚未结算）
-        "current_date": acct.get("current_date"),
-        "price_estimated": any(r.get("price_estimated") for r in rows),
-        "degraded": degraded,
-    }
+    return {
+        "skill_id": skill_id,
+        "name": names.get(skill_id, skill_id),
+        "cash": round(acct.get("cash", 0.0), 6),
+        "total_assets": round(total, 6),
+        "initial_cash": round(float(init), 6),
+        "total_return_rate": round((total - init) / init, 6),
+        "avg_position": avg_position,
+        "unrealized_pnl": round(unrealized, 6),
+        "realized_pnl": round(acct.get("realized_pnl", 0.0), 6),
+        "win_rate": stats.get("win_rate"),
+        "profit_loss_ratio": stats.get("profit_loss_ratio"),
+        "avg_holding_days": stats.get("avg_holding_days"),
+        "today_trades_count": len([t for t in today_trades if t.get("status") == "成交"]),
+        "today_rejected_count": len([t for t in today_trades if t.get("status") == "拒绝"]),
+        "updated_at": today,
+        # R16：账户结算日（前端「结算至 X」标注用；None=尚未结算）
+        "current_date": acct.get("current_date"),
+        "price_estimated": any(r.get("price_estimated") for r in rows),
+        "degraded": degraded,
+    }
 
 
 @router.get("")

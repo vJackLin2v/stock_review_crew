@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { fmtDate, fmtTimeHM } from "../format";
 import { stageLabel } from "../stages";
 import { DEFAULT_MODE, MODES, modeLabel, todayStr } from "../modes";
+import { ANALYSTS } from "../mock";
+import MultiSelect from "./MultiSelect";
 
 export default function Sidebar({
   collapsed,
@@ -25,6 +27,10 @@ export default function Sidebar({
   onOpenAccounts,
   // requirements-backtest-ui：侧栏「回测」入口
   onOpenBacktest,
+    // 2026-08-17：分析师提示词独立页面入口
+    onOpenPrompts,
+    // 2026-08-17：监管异动独立页面入口
+    onOpenAnomaly,
 }) {
   const [confirmReviewKey, setConfirmReviewKey] = useState(null);
   const [confirmChatId, setConfirmChatId] = useState(null);
@@ -36,6 +42,7 @@ export default function Sidebar({
   const [bfMode, setBfMode] = useState(DEFAULT_MODE);
   const [bfBusy, setBfBusy] = useState(false);
   const [bfError, setBfError] = useState("");
+    const [bfAnalysts, setBfAnalysts] = useState(ANALYSTS.map((a) => a.id));
 
   const groups = history.groups || [];
   const sessions = Array.isArray(chatSessions) ? chatSessions : [];
@@ -96,7 +103,7 @@ export default function Sidebar({
     setBfBusy(true);
     setBfError("");
     try {
-      await onStartReview({ date: bfDate, mode: bfMode });
+        await onStartReview({ date: bfDate, mode: bfMode, analysts: bfAnalysts.length ? bfAnalysts : undefined });
       setBfOpen(false);
       if (onCloseMobile) onCloseMobile();
     } catch (err) {
@@ -163,6 +170,13 @@ export default function Sidebar({
               </option>
             ))}
           </select>
+            <MultiSelect
+              options={ANALYSTS}
+              value={bfAnalysts}
+              onChange={setBfAnalysts}
+              placeholder="选择参与复盘的分析师"
+              label="选择参与复盘的分析师（可多选）"
+            />
           {bfError ? <div className="sidebar-del-error">{bfError}</div> : null}
           <button
             className="btn btn-accent btn-sm backfill-go"
@@ -191,6 +205,24 @@ export default function Sidebar({
       >
         <span className="new-text">回测</span>
       </button>
+
+        {/* 2026-08-17：分析师提示词独立页面入口 */}
+        <button
+          className="btn btn-outline new-btn"
+          onClick={pick(onOpenPrompts)}
+          title="分析师提示词"
+        >
+          <span className="new-text">分析师提示词</span>
+        </button>
+
+        {/* 2026-08-17：监管异动独立页面入口 */}
+        <button
+          className="btn btn-outline new-btn"
+          onClick={pick(onOpenAnomaly)}
+          title="监管异动"
+        >
+          <span className="new-text">监管异动</span>
+        </button>
 
       {/* 运行中任务指示器：切换视图不丢任务，一键回到进度/结果 */}
       {jobState === "queued" || jobState === "running" ? (

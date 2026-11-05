@@ -1,7 +1,7 @@
 /* ============================================================================
    R12 视觉重设计（satori 风格）
    - 浅色主视觉：米白底 #f5f5f2 + 白卡片（圆角 12-16px、细边框、轻投影）
-   - 强调色：紫 #6859cf（参考站）为主，品牌绿 #10A37F 保留为次级成功色
+   - 强调色：A股复盘红 #c8423c（参考站）为主，品牌绿 #10A37F 保留为次级成功色
    - 侧栏保留深色品牌（#17181D），与米白内容区形成强对比
    - 深/浅双主题完整配色（html[data-theme]）；全站字号 html[data-font]
    - 红涨绿跌 --up/--down（JS 按设置注入 #e03131/#0CA678）；警示框不参与配色
@@ -9,11 +9,11 @@
    ============================================================================ */
 
 :root {
-  /* 品牌强调：紫（satori）为主，品牌绿为次级成功色 */
-  --accent: #6859cf;
-  --accent-dark: #5748bb;
-  --accent-soft: #efedfb;
-  --accent-line: rgba(104, 89, 207, 0.32);
+  /* 品牌强调：A股复盘红为主，品牌绿为次级成功色 */
+  --accent: #c8423c;
+  --accent-dark: #a93226;
+  --accent-soft: #fdeceb;
+  --accent-line: rgba(200, 66, 60, 0.32);
   --success: #10a37f;
   --success-dark: #0d8f6f;
   --success-soft: #e6f6f1;
@@ -63,10 +63,10 @@
 
 /* ==================== 深色主题（完整配色） ==================== */
 [data-theme="dark"] {
-  --accent: #7b6cf2;
-  --accent-dark: #9a8ef5;
-  --accent-soft: rgba(104, 89, 207, 0.2);
-  --accent-line: rgba(122, 105, 235, 0.48);
+  --accent: #e0605a;
+  --accent-dark: #f08a80;
+  --accent-soft: rgba(200, 66, 60, 0.2);
+  --accent-line: rgba(224, 96, 90, 0.48);
   --success: #10a37f;
   --success-dark: #4ade80;
   --success-soft: rgba(16, 163, 127, 0.14);
@@ -277,7 +277,7 @@ a { color: var(--accent); }
   width: 34px;
   height: 34px;
   border-radius: 10px;
-  background: linear-gradient(135deg, #7e6ff0, #5546b6);
+  background: linear-gradient(135deg, #d64545, #a93226);
   color: #fff;
   display: flex;
   align-items: center;
@@ -286,7 +286,7 @@ a { color: var(--accent); }
   font-size: 15px;
   flex-shrink: 0;
   cursor: default;
-  box-shadow: 0 2px 8px rgba(104, 89, 207, 0.35);
+  box-shadow: 0 2px 8px rgba(200, 66, 60, 0.35);
 }
 
 .sidebar.collapsed .brand-mark { cursor: pointer; }
@@ -295,7 +295,7 @@ a { color: var(--accent); }
 .brand-title { font-size: 15px; font-weight: 700; letter-spacing: 0.2px; white-space: nowrap; }
 .brand-sub { font-size: 11px; color: var(--sidebar-text-2); white-space: nowrap; }
 
-.new-btn { margin: 4px 14px 12px; box-shadow: 0 2px 10px rgba(104, 89, 207, 0.3); }
+.new-btn { margin: 4px 14px 12px; box-shadow: 0 2px 10px rgba(200, 66, 60, 0.3); }
 .sidebar.collapsed .new-btn { margin: 4px 10px 10px; justify-content: center; padding: 10px 0; }
 
 /* ---------- R11-R1 侧栏「补做复盘」入口（原首页新建复盘表单迁移） ---------- */
@@ -594,7 +594,7 @@ a { color: var(--accent); }
 
 .grid { display: grid; gap: 16px; }
 .grid-2 { grid-template-columns: 1.5fr 1fr; }
-.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-3 { grid-template-columns: repeat(4, 1fr); }
 
 .kpi-grid {
   display: grid;
@@ -716,7 +716,7 @@ a { color: var(--accent); }
 .form-note { font-size: 11.5px; color: var(--text-2); margin-top: 6px; line-height: 1.55; }
 .form-actions { margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; }
 
-.mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.mode-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 
 .mode-card {
   background: var(--card);
@@ -1286,7 +1286,7 @@ a { color: var(--accent); }
   color: #fff;
   border-radius: 14px;
   border-top-right-radius: 5px;
-  box-shadow: 0 2px 10px rgba(104, 89, 207, 0.3);
+  box-shadow: 0 2px 10px rgba(200, 66, 60, 0.3);
 }
 .msg-analyst-name { font-weight: 700; color: var(--accent-dark); margin-bottom: 4px; }
 
@@ -1688,7 +1688,7 @@ a { color: var(--accent); }
 /* F2 额外指数（指数卡下方横条） */
 .xi-strip {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
   margin-top: 12px;
 }
@@ -2432,6 +2432,26 @@ html[data-font="xlarge"] body { font-size: 17px; }
   margin-top: 2px;
 }
 
+/* 2026-08-17：模拟账户列表展示 + 账户概览单行文本 */
+.accounts-list-row { cursor: pointer; }
+.accounts-list-row td:first-child { display: flex; align-items: center; gap: 8px; }
+.account-overview-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--field-bg);
+  border: 1px solid var(--border-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.account-overview-item { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.account-overview-label { color: var(--text-2); font-size: 12px; }
+.account-overview-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+
 @media (max-width: 860px) {
   .account-list {
     grid-template-columns: 1fr;
@@ -2804,7 +2824,7 @@ html[data-font="xlarge"] body { font-size: 17px; }
   padding: 10px 12px;
   border-radius: 10px;
   background: linear-gradient(135deg, rgba(104, 89, 207, 0.1), rgba(92, 124, 250, 0.06));
-  border: 1px solid rgba(104, 89, 207, 0.2);
+  border: 1px solid rgba(200, 66, 60, 0.2);
 }
 .bt-total-big { display: flex; flex-direction: column; }
 .bt-total-label { font-size: 11.5px; font-weight: 700; color: var(--text-2); letter-spacing: 0.4px; }
@@ -2903,6 +2923,41 @@ html[data-font="xlarge"] body { font-size: 17px; }
 .bt-hist-range { font-weight: 600; white-space: nowrap; }
 .bt-hist-meta { color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
+/* 回测期末账户摘要（2026-08-17 新增） */
+.bt-account-summary { margin-top: 6px; }
+.bt-account-summary .bt-section-title { margin-top: 12px; }
+.bt-table-scroll { overflow-x: auto; }
+.bt-account-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  min-width: 760px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.bt-account-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-3);
+  padding: 7px 9px;
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border-soft);
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+.bt-account-table td {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border-soft);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.bt-account-table tbody tr:last-child td { border-bottom: none; }
+.bt-account-table tbody tr:hover { background: var(--hover); }
+.bt-note { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
+
+
 @media (max-width: 768px) {
   .bt-day-row {
     grid-template-columns: minmax(82px, 1.2fr) 72px 1fr;
@@ -2914,3 +2969,37 @@ html[data-font="xlarge"] body { font-size: 17px; }
   .bt-hist-item { grid-template-columns: 1fr 78px; }
   .bt-hist-meta { grid-column: 1 / -1; }
 }
+
+/* 2026-08-17：分析师提示词独立页 Markdown 预览 */
+.skill-prompt-preview {
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  padding: 12px 14px;
+  margin: 8px 0 10px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.skill-prompt-preview .md { max-width: none; }
+
+
+/* 2026-08-17：监管异动 UI */
+.anom-status-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.anom-status { font-weight: 800; font-size: 14px; padding: 4px 10px; border-radius: 8px; }
+.anom-status.ok { background: rgba(16,163,127,.12); color: var(--success-dark); }
+.anom-status.warn { background: rgba(224,49,49,.12); color: var(--up); }
+.anom-stock-code { color: var(--text-2); }
+.anom-close b { font-size: 17px; }
+.anom-pct { font-weight: 700; }
+
+.anom-wins { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
+.anom-win { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--field-bg); }
+.anom-win.warn { border-color: var(--accent-line); background: var(--accent-soft); }
+.anom-win-head { display: flex; align-items: baseline; justify-content: space-between; }
+.anom-win-label { font-size: 12px; color: var(--text-2); }
+.anom-win-value { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.anom-win-thr { font-size: 11.5px; color: var(--text-3); margin: 2px 0 8px; }
+.anom-win-row { font-size: 12.5px; color: var(--text-2); margin-top: 4px; }
+.anom-win-row b { color: var(--text); }
+.anom-same { margin-top: 12px; padding: 8px 12px; border-radius: 8px; background: var(--bg-soft); font-size: 13px; }
+@media (max-width: 860px) { .anom-wins { grid-template-columns: 1fr; } }

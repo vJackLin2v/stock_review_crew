@@ -26,7 +26,7 @@ from .storage import chats as chat_storage
 from .llm_runtime import invoke_llm
 
 DISCLAIMER = "仅供参考，不构成投资建议"
-DEFAULT_ANALYST_IDS = ["alang", "bingchuan", "baxiaoxian", "yangjia", "tiechui"]
+DEFAULT_ANALYST_IDS = ["alang", "bingchuan", "baxiaoxian", "yangjia", "tiechui", "daxianzun"]
 DEFAULT_LLM_TIMEOUT = 120
 CHROMA_COLLECTION = "chat_history"
 CHROMA_CHUNK_SIZE = 400

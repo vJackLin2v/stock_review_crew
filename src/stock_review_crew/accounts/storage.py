@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 _ACCOUNT_ROOT = "accounts"
+_SETTINGS_ROOT = "settings"
+DEFAULT_INITIAL_CASH = 100_000.0
 
 
 def accounts_root() -> Path:
@@ -78,3 +80,72 @@ def save_account(skill_id: str, acct: dict) -> Path:
         json.dumps(acct.get("snapshots") or [], ensure_ascii=False, indent=1), encoding="utf-8"
     )
     return d
+
+
+def settings_root() -> Path:
+    """模拟交易设置根目录：<数据根>/settings。"""
+    override = os.environ.get("STOCK_REVIEW_DATA_DIR", "").strip()
+    base = Path(override) if override else Path(__file__).resolve().parents[3] / "data"
+    return base / _SETTINGS_ROOT
+
+
+def accounts_settings_path() -> Path:
+    return settings_root() / "accounts.json"
+
+
+def load_initial_cash() -> float:
+    """读取分析师初始资金；缺失/损坏/非法 → DEFAULT_INITIAL_CASH（绝不抛异常）。"""
+    path = accounts_settings_path()
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                value = float(data.get("initial_cash", DEFAULT_INITIAL_CASH))
+                if value > 0:
+                    return value
+    except Exception:  # noqa: BLE001 - 设置损坏按默认值
+        pass
+    return DEFAULT_INITIAL_CASH
+
+
+def save_initial_cash(value: float) -> Path:
+    """写入分析师初始资金设置。返回设置文件路径。"""
+    d = settings_root()
+    d.mkdir(parents=True, exist_ok=True)
+    path = accounts_settings_path()
+    path.write_text(
+        json.dumps({"initial_cash": round(float(value), 2)}, ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
+    return path
+
+
+def llm_settings_path() -> Path:
+    """LLM 模型设置文件：<数据根>/settings/llm.json。"""
+    return settings_root() / "llm.json"
+
+
+def load_llm_model(default: str = "") -> str:
+    """读取当前 LLM 模型；缺失/损坏 → default（绝不抛异常）。"""
+    path = llm_settings_path()
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("model"):
+                return str(data["model"]).strip()
+    except Exception:  # noqa: BLE001 - 设置损坏按默认值
+        pass
+    return default or ""
+
+
+def save_llm_model(model: str) -> Path:
+    """写入当前 LLM 模型设置。返回设置文件路径。"""
+    d = settings_root()
+    d.mkdir(parents=True, exist_ok=True)
+    path = llm_settings_path()
+    path.write_text(
+        json.dumps({"model": str(model).strip()}, ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
+    return path
+

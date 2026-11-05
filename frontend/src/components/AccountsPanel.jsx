@@ -7,7 +7,7 @@ import { Chart } from "./Charts";
 // R12-A3：侧栏「模拟账户」独立视图
 //   GET /api/accounts            → 5 位分析师摘要列表
 //   GET /api/accounts/{skill_id} → 单人详情（持仓/交易记录含拒绝/收益率曲线/盈亏）
-const ACCENT = "#6859cf";
+const ACCENT = "#c8423c";
 const GRAY = "#adb5bd";
 const BLUE = "#5c7cfa";
 const INITIAL_CAPITAL = 100000; // 初始资金 10 万
@@ -411,7 +411,7 @@ export default function AccountsPanel({ onBack }) {
       .filter((s) => s.date && s.total_assets != null)
       .map((s) => ({
         date: s.date,
-        value: (s.total_assets - INITIAL_CAPITAL) / INITIAL_CAPITAL,
+          value: (s.total_assets - (detail.initial_cash || INITIAL_CAPITAL)) / (detail.initial_cash || INITIAL_CAPITAL),
       }));
   }, [detail]);
 
@@ -483,6 +483,19 @@ export default function AccountsPanel({ onBack }) {
             ? "买入到卖出的自然日"
             : "暂无平仓记录",
       },
+        {
+          label: "平均仓位",
+          value:
+            detail && Number.isFinite(detail.avg_position)
+              ? fmtPct(detail.avg_position, { signed: false })
+              : "—",
+          cls: "zero",
+          sub:
+            detail && Number.isFinite(detail.avg_position)
+              ? "快照持仓市值 / 总资产的均值"
+              : "暂无快照数据",
+        },
+
       {
         label: "持仓数量",
         value: fmtCount(detail && detail.positions ? detail.positions.length : 0),
@@ -529,25 +542,24 @@ export default function AccountsPanel({ onBack }) {
           </div>
         ) : detail ? (
           <>
-            <div className="card">
-              <h3 className="card-title">账户概览</h3>
-              <p className="card-sub">初始资金 100,000 元；比率已 ×100 展示</p>
-              {/* 改动6：结算日至标注（current_date 为空 → 尚未结算） */}
-              <div className="settle-note">
-                {detail.current_date
-                  ? `账户结算至 ${detail.current_date}（未结算日至当前）`
-                  : "尚未结算"}
+              <div className="card">
+                <h3 className="card-title">账户概览</h3>
+                <p className="card-sub">初始资金 {detail.initial_cash ? Number(detail.initial_cash).toLocaleString("zh-CN") : "100,000"} 元；比率已 ×100 展示</p>
+                {/* 改动6：结算日至标注（current_date 为空 → 尚未结算） */}
+                <div className="settle-note">
+                  {detail.current_date
+                    ? `账户结算至 ${detail.current_date}（未结算日至当前）`
+                    : "尚未结算"}
+                </div>
+                <div className="account-overview-line">
+                  {kpis.map((k) => (
+                    <span key={k.label} className="account-overview-item">
+                      <span className="account-overview-label">{k.label}</span>
+                      <span className={`account-overview-value ${k.cls}`}>{k.value}</span>
+                    </span>
+                  ))}
+                </div>
               </div>
-              <div className="kpi-grid" style={{ marginTop: 10 }}>
-                {kpis.map((k) => (
-                  <div key={k.label} className="kpi">
-                    <div className="kpi-label">{k.label}</div>
-                    <div className={`kpi-value ${k.cls}`}>{k.value}</div>
-                    {k.sub ? <div className="kpi-sub">{k.sub}</div> : null}
-                  </div>
-                ))}
-              </div>
-            </div>
 
             <div className="card">
               <h3 className="card-title">收益率曲线（近 {curvePoints.length} 日）</h3>
@@ -599,7 +611,7 @@ export default function AccountsPanel({ onBack }) {
             <h3 className="card-title" style={{ marginBottom: 0 }}>
               模拟账户
             </h3>
-            <p className="card-sub">5 位分析师 · 初始资金各 10 万 · 红涨绿跌</p>
+              <p className="card-sub">5 位分析师 · 初始资金各 {accounts[0] && accounts[0].initial_cash ? Number(accounts[0].initial_cash).toLocaleString("zh-CN") : "10 万"} 元 · 红涨绿跌</p>
           </div>
           {offline ? <span className="pill offline">离线 mock</span> : null}
         </div>
@@ -617,71 +629,52 @@ export default function AccountsPanel({ onBack }) {
           </div>
         </div>
       ) : (
-        <div className="card">
-          <div className="account-card-grid">
-            {accounts.map((a, idx) => (
-              <div
-                key={a.skill_id}
-                className="account-card"
-                onClick={() => openDetail(a.skill_id)}
-              >
-                <div className="account-card-head">
-                  <span className={`account-avatar avatar${AVATAR_CLASSES[idx % AVATAR_CLASSES.length] || ""}`}>
-                    {(a.name || "?").slice(0, 1)}
-                  </span>
-                  <span className="account-card-name">{a.name || a.skill_id}</span>
-                </div>
-                <div className="account-card-kpis">
-                  <div className="account-card-kpi">
-                    <div className="account-card-kpi-label">总资产</div>
-                    <div className="account-card-kpi-value">
-                      {a.total_assets != null ? fmtAmount(a.total_assets) : "—"}
-                    </div>
-                  </div>
-                  <div className="account-card-kpi">
-                    <div className="account-card-kpi-label">累计收益率</div>
-                    <div className={`account-card-kpi-value ${rateCls2(a.total_return_rate)}`}>
-                      {a.total_return_rate != null
-                        ? fmtPct(a.total_return_rate, { signed: true })
-                        : "—"}
-                    </div>
-                  </div>
-                  <div className="account-card-kpi">
-                    <div className="account-card-kpi-label">现金</div>
-                    <div className="account-card-kpi-value">
-                      {a.cash != null ? fmtAmount(a.cash) : "—"}
-                    </div>
-                  </div>
-                  <div className="account-card-kpi">
-                    <div className="account-card-kpi-label">浮动盈亏</div>
-                    <div className={`account-card-kpi-value ${rateCls2(a.unrealized_pnl)}`}>
-                      {fmtSignedMoney(a.unrealized_pnl)}
-                    </div>
-                  </div>
-                  <div className="account-card-kpi">
-                    <div className="account-card-kpi-label">已实现盈亏</div>
-                    <div className={`account-card-kpi-value ${rateCls2(a.realized_pnl)}`}>
-                      {fmtSignedMoney(a.realized_pnl)}
-                    </div>
-                  </div>
-                  <div className="account-card-kpi">
-                    <div className="account-card-kpi-label">今日成交</div>
-                    <div className="account-card-kpi-value">
-                      {fmtCount(a.today_trades_count)}
-                    </div>
-                  </div>
-                </div>
+          <div className="card">
+            <div className="accounts-table-wrap">
+              <table className="accounts-table">
+                <thead>
+                  <tr>
+                    <th>分析师</th>
+                    <th>初始资金</th>
+                    <th>总资产</th>
+                    <th>累计收益率</th>
+                    <th>平均仓位</th>
+                    <th>现金</th>
+                    <th>浮动盈亏</th>
+                    <th>已实现盈亏</th>
+                    <th>今日成交</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {accounts.map((a, idx) => (
+                    <tr key={a.skill_id} className="accounts-list-row" onClick={() => openDetail(a.skill_id)}>
+                      <td>
+                        <span className={`account-avatar avatar ${AVATAR_CLASSES[idx % AVATAR_CLASSES.length] || ""}`}>
+                          {(a.name || "?").slice(0, 1)}
+                        </span>
+                        <span className="account-card-name">{a.name || a.skill_id}</span>
+                      </td>
+                      <td>{a.initial_cash != null ? fmtAmount(a.initial_cash) : "—"}</td>
+                      <td>{a.total_assets != null ? fmtAmount(a.total_assets) : "—"}</td>
+                      <td className={rateCls2(a.total_return_rate)}>{a.total_return_rate != null ? fmtPct(a.total_return_rate, { signed: true }) : "—"}</td>
+                      <td>{a.avg_position != null ? fmtPct(a.avg_position, { signed: false }) : "—"}</td>
+                      <td>{a.cash != null ? fmtAmount(a.cash) : "—"}</td>
+                      <td className={rateCls2(a.unrealized_pnl)}>{fmtSignedMoney(a.unrealized_pnl)}</td>
+                      <td className={rateCls2(a.realized_pnl)}>{fmtSignedMoney(a.realized_pnl)}</td>
+                      <td>{fmtCount(a.today_trades_count)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="disclaimer">
+              <span>⚠️</span>
+              <div>
+                <b>免责声明：</b>
+                模拟账户为系统规则引擎演示数据，仅供参考，不构成投资建议。
               </div>
-            ))}
-          </div>
-          <div className="disclaimer">
-            <span>⚠️</span>
-            <div>
-              <b>免责声明：</b>
-              模拟账户为系统规则引擎演示数据，仅供参考，不构成投资建议。
             </div>
           </div>
-        </div>
       )}
     </div>
   );
